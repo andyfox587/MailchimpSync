@@ -1,0 +1,42 @@
+# Render Blueprint for VivaSpot Mailchimp Integration
+# Deploy with: render blueprint launch
+
+services:
+  # Web Service
+  - type: web
+    name: vivaspot-mailchimp
+    env: node
+    region: oregon
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MAILCHIMP_CLIENT_ID
+        sync: false
+      - key: MAILCHIMP_CLIENT_SECRET
+        sync: false
+      - key: OAUTH_REDIRECT_URI
+        sync: false
+      - key: APP_BASE_URL
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: vivaspot-mailchimp-db
+          property: connectionString
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: ADMIN_API_KEY
+        generateValue: true
+
+databases:
+  # PostgreSQL Database
+  - name: vivaspot-mailchimp-db
+    databaseName: vivaspot_mailchimp
+    plan: starter
+    region: oregon
+    postgresMajorVersion: 15
+    # Enable pg_trgm extension for fuzzy matching
+    # Note: You may need to enable this manually via Render dashboard

@@ -1,0 +1,41 @@
+{
+  "name": "vivaspot-mailchimp-integration",
+  "version": "1.0.0",
+  "description": "VivaSpot WiFi Marketing integration with Mailchimp",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "nodemon src/app.js",
+    "db:migrate": "node src/db/migrate.js",
+    "test": "jest",
+    "lint": "eslint src/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vivaspot/mailchimp-integration.git"
+  },
+  "author": "VivaSpot (iValu8 Inc.)",
+  "license": "UNLICENSED",
+  "private": true,
+  "bugs": {
+    "url": "https://github.com/vivaspot/mailchimp-integration/issues"
+  },
+  "homepage": "https://github.com/vivaspot/mailchimp-integration#readme",
+  "dependencies": {
+    "express": "^4.18.2",
+    "pg": "^8.11.3",
+    "dotenv": "^16.3.1",
+    "axios": "^1.6.2",
+    "crypto": "^1.0.1",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "express-rate-limit": "^7.1.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2",
+    "jest": "^29.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
