@@ -315,15 +315,126 @@ async function findSitesByHospitalityGroup(groupName) {
 async function findSiteByEmail(email) {
   try {
     const result = await vivaspotQuery(`
-      SELECT * FROM vivaspot_sites 
+      SELECT * FROM vivaspot_sites
       WHERE $1 = ANY(merchant_emails)
       LIMIT 1
     `, [email.toLowerCase()]);
-    
+
     return result.rows[0] || null;
   } catch (error) {
     console.error('Error finding site by email:', error);
     return null;
+  }
+}
+
+/**
+ * Find ALL sites matching by email address
+ * Used when one email manages multiple locations (hospitality groups)
+ */
+async function findAllSitesByEmail(email) {
+  try {
+    const result = await vivaspotQuery(`
+      SELECT * FROM vivaspot_sites
+      WHERE $1 = ANY(merchant_emails)
+      ORDER BY restaurant_name
+    `, [email.toLowerCase()]);
+
+    return result.rows;
+  } catch (error) {
+    console.error('Error finding sites by email:', error);
+    return [];
+  }
+}
+
+/**
+ * Find ALL sites matching by restaurant name (fuzzy match)
+ * Returns all potential matches above threshold, not just the best one
+ */
+async function findAllSitesByRestaurantName(restaurantName, threshold = 0.3) {
+  try {
+    // Collect matches from different strategies
+    const matches = new Map(); // Use Map to dedupe by site id
+
+    // 1. Exact matches
+    const exactResult = await vivaspotQuery(`
+      SELECT *, 1.0 as match_score, 'exact' as match_type
+      FROM vivaspot_sites
+      WHERE LOWER(restaurant_name) = LOWER($1)
+    `, [restaurantName]);
+
+    exactResult.rows.forEach(row => matches.set(row.id, row));
+
+    // 2. Fuzzy matches with pg_trgm
+    const fuzzyResult = await vivaspotQuery(`
+      SELECT *,
+             similarity(restaurant_name, $1) as match_score,
+             'fuzzy' as match_type
+      FROM vivaspot_sites
+      WHERE similarity(restaurant_name, $1) > $2
+      ORDER BY match_score DESC
+    `, [restaurantName, threshold]);
+
+    fuzzyResult.rows.forEach(row => {
+      if (!matches.has(row.id)) {
+        matches.set(row.id, row);
+      }
+    });
+
+    // 3. Contains matches (name contains search term or vice versa)
+    const containsResult = await vivaspotQuery(`
+      SELECT *, 0.5 as match_score, 'contains' as match_type
+      FROM vivaspot_sites
+      WHERE LOWER(restaurant_name) LIKE LOWER($1)
+      OR LOWER($2) LIKE '%' || LOWER(restaurant_name) || '%'
+    `, [`%${restaurantName}%`, restaurantName]);
+
+    containsResult.rows.forEach(row => {
+      if (!matches.has(row.id)) {
+        matches.set(row.id, row);
+      }
+    });
+
+    // Convert to array and sort by match score
+    const results = Array.from(matches.values())
+      .sort((a, b) => b.match_score - a.match_score);
+
+    console.log(`Found ${results.length} potential site matches for "${restaurantName}"`);
+    return results;
+  } catch (error) {
+    console.error('Error finding sites by restaurant name:', error);
+    return [];
+  }
+}
+
+/**
+ * Find all candidate sites for auto-mapping
+ * Combines email and name matching strategies
+ * Returns { sites: [], matchMethod: 'email'|'name'|'none' }
+ */
+async function findCandidateSites(accountName, loginEmail) {
+  try {
+    // Strategy 1: Try email match first (most reliable for hospitality groups)
+    if (loginEmail) {
+      const emailMatches = await findAllSitesByEmail(loginEmail);
+      if (emailMatches.length > 0) {
+        console.log(`Found ${emailMatches.length} site(s) by email "${loginEmail}"`);
+        return { sites: emailMatches, matchMethod: 'email' };
+      }
+    }
+
+    // Strategy 2: Try name matching
+    const nameMatches = await findAllSitesByRestaurantName(accountName);
+    if (nameMatches.length > 0) {
+      console.log(`Found ${nameMatches.length} site(s) by name "${accountName}"`);
+      return { sites: nameMatches, matchMethod: 'name' };
+    }
+
+    // No matches found
+    console.log(`No site matches found for account "${accountName}" (email: ${loginEmail})`);
+    return { sites: [], matchMethod: 'none' };
+  } catch (error) {
+    console.error('Error finding candidate sites:', error);
+    return { sites: [], matchMethod: 'none' };
   }
 }
 
@@ -415,6 +526,9 @@ module.exports = {
   findSiteByRestaurantName,
   findSitesByHospitalityGroup,
   findSiteByEmail,
+  findAllSitesByEmail,
+  findAllSitesByRestaurantName,
+  findCandidateSites,
   
   // OAuth
   createPendingOAuth,
