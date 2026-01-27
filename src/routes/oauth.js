@@ -129,20 +129,105 @@ router.get('/callback', async (req, res) => {
       `);
     }
     
-    // If only one audience, use it automatically
+    // If only one audience, use it automatically but still check for site matching
     if (audiences.length === 1) {
-      await db.upsertConnection({
-        macAddress: mac_address,
-        accessToken: accessToken,
-        dataCenter: metadata.dataCenter,
-        accountId: metadata.accountId,
-        accountName: metadata.accountName,
-        audienceId: audiences[0].id,
-        audienceName: audiences[0].name,
-        sourceTag: null
-      });
-      
-      return renderSuccessPage(res, metadata.accountName, audiences[0].name, redirect_url);
+      const selectedAudience = audiences[0];
+
+      // Try auto-mapping: find all candidate sites by email and name
+      const { sites, matchMethod } = await db.findCandidateSites(
+        metadata.accountName,
+        metadata.loginEmail
+      );
+
+      if (sites.length === 0) {
+        // No matches found - use the MAC address from URL if provided
+        console.log(`No auto-mapping match for "${metadata.accountName}" with single audience`);
+
+        if (mac_address && mac_address !== 'auto') {
+          // Use provided MAC address
+          await db.upsertConnection({
+            macAddress: mac_address,
+            accessToken: accessToken,
+            dataCenter: metadata.dataCenter,
+            accountId: metadata.accountId,
+            accountName: metadata.accountName,
+            audienceId: selectedAudience.id,
+            audienceName: selectedAudience.name,
+            sourceTag: null
+          });
+
+          return renderSuccessPage(res, metadata.accountName, selectedAudience.name, redirect_url);
+        } else {
+          // No MAC and no site match - redirect to manual setup
+          const setupUrl = `/setup/${encodeURIComponent(metadata.accountId)}?` +
+            `account_name=${encodeURIComponent(metadata.accountName)}` +
+            `&audience_id=${encodeURIComponent(selectedAudience.id)}` +
+            `&audience_name=${encodeURIComponent(selectedAudience.name)}` +
+            `&access_token=${encodeURIComponent(accessToken)}` +
+            `&data_center=${encodeURIComponent(metadata.dataCenter)}`;
+
+          return res.redirect(setupUrl);
+        }
+
+      } else if (sites.length === 1) {
+        // Exactly one match - auto-map all MACs from that site
+        const site = sites[0];
+
+        if (site.mac_addresses && site.mac_addresses.length > 0) {
+          console.log(`Auto-mapping ${site.mac_addresses.length} MAC(s) for "${site.restaurant_name}" (matched by ${matchMethod}, single audience)`);
+
+          const connections = site.mac_addresses.map(mac => ({
+            macAddress: mac.toLowerCase(),
+            accessToken: accessToken,
+            dataCenter: metadata.dataCenter,
+            accountId: metadata.accountId,
+            accountName: metadata.accountName,
+            audienceId: selectedAudience.id,
+            audienceName: selectedAudience.name,
+            sourceTag: site.restaurant_name || null
+          }));
+
+          await db.bulkUpsertConnections(connections);
+
+          return renderSuccessPage(res, metadata.accountName, selectedAudience.name, redirect_url, site.mac_addresses.length, site.restaurant_name);
+        } else {
+          // Site found but no MAC addresses configured
+          console.log(`Site "${site.restaurant_name}" found but has no MAC addresses (single audience)`);
+
+          const setupUrl = `/setup/${encodeURIComponent(metadata.accountId)}?` +
+            `account_name=${encodeURIComponent(metadata.accountName)}` +
+            `&audience_id=${encodeURIComponent(selectedAudience.id)}` +
+            `&audience_name=${encodeURIComponent(selectedAudience.name)}` +
+            `&access_token=${encodeURIComponent(accessToken)}` +
+            `&data_center=${encodeURIComponent(metadata.dataCenter)}` +
+            `&site_name=${encodeURIComponent(site.restaurant_name)}`;
+
+          return res.redirect(setupUrl);
+        }
+
+      } else {
+        // Multiple matches found - need user to select location
+        console.log(`Multiple sites (${sites.length}) found for "${metadata.accountName}" - showing location selection (single audience)`);
+
+        // Create state for location selection step
+        const locationState = crypto.randomBytes(32).toString('hex');
+
+        // Store credentials and selected audience for the location selection step
+        await db.query(`
+          INSERT INTO pending_oauth (state, mac_address, redirect_url, expires_at)
+          VALUES ($1, $2, $3, NOW() + INTERVAL '10 minutes')
+        `, [locationState, mac_address || 'auto', JSON.stringify({
+          accessToken,
+          metadata,
+          redirect_url,
+          audienceId: selectedAudience.id,
+          audienceName: selectedAudience.name,
+          sourceTag: null
+        })]);
+
+        // Render location selection page
+        return renderLocationSelectionPage(res, sites, locationState, metadata.accountName, matchMethod);
+      }
     }
     
     // Multiple audiences - show selection page
