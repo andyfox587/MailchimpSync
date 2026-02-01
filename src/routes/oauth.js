@@ -35,11 +35,11 @@ router.get('/authorize', async (req, res) => {
       });
     }
     
-    // Validate MAC address format
+    // Validate MAC address format (allow 'auto' for site-matching flow)
     const macRegex = /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/;
-    if (!macRegex.test(mac_address)) {
-      return res.status(400).json({ 
-        error: 'Invalid MAC address format. Expected XX:XX:XX:XX:XX:XX' 
+    if (mac_address !== 'auto' && !macRegex.test(mac_address)) {
+      return res.status(400).json({
+        error: 'Invalid MAC address format. Expected XX:XX:XX:XX:XX:XX or "auto"'
       });
     }
     
