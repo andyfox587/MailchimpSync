@@ -389,13 +389,21 @@ router.post('/select-audience', express.urlencoded({ extended: true }), async (r
 /**
  * Complete location selection (when multiple sites match)
  * POST /oauth/select-location
+ * Supports selecting multiple locations via checkboxes
  */
 router.post('/select-location', express.urlencoded({ extended: true }), async (req, res) => {
   try {
-    const { state, site_id } = req.body;
+    const { state } = req.body;
+    // site_ids can be a single value or an array when multiple checkboxes are selected
+    let siteIds = req.body.site_ids;
 
-    if (!state || !site_id) {
+    if (!state || !siteIds) {
       return res.status(400).json({ error: 'Missing required parameters' });
+    }
+
+    // Normalize to array
+    if (!Array.isArray(siteIds)) {
+      siteIds = [siteIds];
     }
 
     // Get pending OAuth data
@@ -418,57 +426,73 @@ router.post('/select-location', express.urlencoded({ extended: true }), async (r
       sourceTag
     } = JSON.parse(pending.redirect_url);
 
-    // Fetch the selected site from VivaSpot database
+    // Fetch all selected sites from VivaSpot database
+    const placeholders = siteIds.map((_, i) => `$${i + 1}`).join(', ');
     const siteResult = await db.vivaspotQuery(
-      'SELECT * FROM vivaspot_sites WHERE id = $1',
-      [site_id]
+      `SELECT * FROM vivaspot_sites WHERE id IN (${placeholders})`,
+      siteIds
     );
 
     if (siteResult.rows.length === 0) {
-      return res.status(400).send('Selected location not found. Please try again.');
+      return res.status(400).send('Selected location(s) not found. Please try again.');
     }
 
-    const site = siteResult.rows[0];
+    const sites = siteResult.rows;
+    const sitesWithoutMacs = sites.filter(s => !s.mac_addresses || s.mac_addresses.length === 0);
 
-    if (!site.mac_addresses || site.mac_addresses.length === 0) {
-      // Site has no MAC addresses configured
-      console.log(`Selected site "${site.restaurant_name}" has no MAC addresses`);
+    // If all selected sites have no MAC addresses, redirect to manual setup
+    if (sitesWithoutMacs.length === sites.length) {
+      console.log(`All selected sites have no MAC addresses`);
 
       await db.query('DELETE FROM pending_oauth WHERE state = $1', [state]);
 
+      const siteNames = sites.map(s => s.restaurant_name).join(', ');
       const setupUrl = `/setup/${encodeURIComponent(metadata.accountId)}?` +
         `account_name=${encodeURIComponent(metadata.accountName)}` +
         `&audience_id=${encodeURIComponent(audienceId)}` +
         `&audience_name=${encodeURIComponent(audienceName)}` +
         `&access_token=${encodeURIComponent(accessToken)}` +
         `&data_center=${encodeURIComponent(metadata.dataCenter)}` +
-        `&site_name=${encodeURIComponent(site.restaurant_name)}`;
+        `&site_name=${encodeURIComponent(siteNames)}`;
 
       res.redirect(setupUrl);
       return;
     }
 
-    // Map all MAC addresses from the selected site
-    console.log(`Mapping ${site.mac_addresses.length} MAC(s) for selected site "${site.restaurant_name}"`);
+    // Build connections for all selected sites that have MAC addresses
+    const allConnections = [];
+    const connectedSiteNames = [];
+    let totalDevices = 0;
 
-    const connections = site.mac_addresses.map(mac => ({
-      macAddress: mac.toLowerCase(),
-      accessToken: accessToken,
-      dataCenter: metadata.dataCenter,
-      accountId: metadata.accountId,
-      accountName: metadata.accountName,
-      audienceId: audienceId,
-      audienceName: audienceName,
-      sourceTag: sourceTag || site.restaurant_name || null
-    }));
+    for (const site of sites) {
+      if (site.mac_addresses && site.mac_addresses.length > 0) {
+        console.log(`Mapping ${site.mac_addresses.length} MAC(s) for selected site "${site.restaurant_name}"`);
 
-    await db.bulkUpsertConnections(connections);
+        const siteConnections = site.mac_addresses.map(mac => ({
+          macAddress: mac.toLowerCase(),
+          accessToken: accessToken,
+          dataCenter: metadata.dataCenter,
+          accountId: metadata.accountId,
+          accountName: metadata.accountName,
+          audienceId: audienceId,
+          audienceName: audienceName,
+          sourceTag: site.restaurant_name || null
+        }));
+
+        allConnections.push(...siteConnections);
+        connectedSiteNames.push(site.restaurant_name);
+        totalDevices += site.mac_addresses.length;
+      }
+    }
+
+    await db.bulkUpsertConnections(allConnections);
 
     // Clean up pending OAuth
     await db.query('DELETE FROM pending_oauth WHERE state = $1', [state]);
 
-    // Show success
-    renderSuccessPage(res, metadata.accountName, audienceName, redirect_url, site.mac_addresses.length, site.restaurant_name);
+    // Show success with all connected locations
+    const locationSummary = connectedSiteNames.join(', ');
+    renderSuccessPage(res, metadata.accountName, audienceName, redirect_url, totalDevices, locationSummary);
 
   } catch (error) {
     console.error('Location selection error:', error);
@@ -671,7 +695,7 @@ function renderLocationSelectionPage(res, sites, state, accountName, matchMethod
 
     return `
       <label style="display: block; padding: 15px; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 10px; cursor: pointer; text-align: left;">
-        <input type="radio" name="site_id" value="${site.id}" required style="margin-right: 10px;">
+        <input type="checkbox" name="site_ids" value="${site.id}" style="margin-right: 10px;">
         <strong>${site.restaurant_name}</strong>
         ${detailsStr}
         <span style="display: block; margin-top: 6px;">${deviceInfo}</span>
@@ -686,22 +710,22 @@ function renderLocationSelectionPage(res, sites, state, accountName, matchMethod
       </head>
       <body style="font-family: Arial, sans-serif; padding: 40px; background: #f5f5f5;">
         <div style="max-width: 550px; margin: 0 auto; background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
-          <h1 style="margin-top: 0;">Select Your Location</h1>
+          <h1 style="margin-top: 0;">Select Your Location(s)</h1>
           <p style="color: #666;">
             Connected to Mailchimp account <strong>${accountName}</strong>.
           </p>
           <p style="color: #666;">
-            ${matchDescription} Please select the location you want to connect:
+            ${matchDescription} Select one or more locations to connect:
           </p>
 
-          <form method="POST" action="/oauth/select-location">
+          <form method="POST" action="/oauth/select-location" id="locationForm">
             <input type="hidden" name="state" value="${state}">
 
             <div style="margin: 20px 0; max-height: 400px; overflow-y: auto;">
               ${locationOptions}
             </div>
 
-            <button type="submit" style="
+            <button type="submit" id="submitBtn" style="
               width: 100%;
               padding: 15px;
               background: #007bff;
@@ -710,8 +734,8 @@ function renderLocationSelectionPage(res, sites, state, accountName, matchMethod
               border-radius: 4px;
               font-size: 16px;
               cursor: pointer;
-            ">
-              Connect This Location
+            " disabled>
+              Connect Selected Location(s)
             </button>
           </form>
 
@@ -719,6 +743,26 @@ function renderLocationSelectionPage(res, sites, state, accountName, matchMethod
             Don't see your location? Contact support for assistance.
           </p>
         </div>
+
+        <script>
+          // Enable/disable submit button based on checkbox selection
+          const checkboxes = document.querySelectorAll('input[name="site_ids"]');
+          const submitBtn = document.getElementById('submitBtn');
+
+          function updateSubmitButton() {
+            const checked = document.querySelectorAll('input[name="site_ids"]:checked');
+            submitBtn.disabled = checked.length === 0;
+            if (checked.length === 0) {
+              submitBtn.textContent = 'Connect Selected Location(s)';
+            } else if (checked.length === 1) {
+              submitBtn.textContent = 'Connect 1 Location';
+            } else {
+              submitBtn.textContent = 'Connect ' + checked.length + ' Locations';
+            }
+          }
+
+          checkboxes.forEach(cb => cb.addEventListener('change', updateSubmitButton));
+        </script>
       </body>
     </html>
   `);
