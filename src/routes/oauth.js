@@ -397,8 +397,12 @@ router.post('/select-location', express.urlencoded({ extended: true }), async (r
     // site_ids can be a single value or an array when multiple checkboxes are selected
     let siteIds = req.body.site_ids;
 
-    if (!state || !siteIds) {
-      return res.status(400).json({ error: 'Missing required parameters' });
+    if (!state) {
+      return res.status(400).send('Session expired. Please start again.');
+    }
+
+    if (!siteIds) {
+      return res.status(400).send('Please select at least one location.');
     }
 
     // Normalize to array
@@ -734,7 +738,7 @@ function renderLocationSelectionPage(res, sites, state, accountName, matchMethod
               border-radius: 4px;
               font-size: 16px;
               cursor: pointer;
-            " disabled>
+            ">
               Connect Selected Location(s)
             </button>
           </form>
@@ -743,26 +747,6 @@ function renderLocationSelectionPage(res, sites, state, accountName, matchMethod
             Don't see your location? Contact support for assistance.
           </p>
         </div>
-
-        <script>
-          // Enable/disable submit button based on checkbox selection
-          const checkboxes = document.querySelectorAll('input[name="site_ids"]');
-          const submitBtn = document.getElementById('submitBtn');
-
-          function updateSubmitButton() {
-            const checked = document.querySelectorAll('input[name="site_ids"]:checked');
-            submitBtn.disabled = checked.length === 0;
-            if (checked.length === 0) {
-              submitBtn.textContent = 'Connect Selected Location(s)';
-            } else if (checked.length === 1) {
-              submitBtn.textContent = 'Connect 1 Location';
-            } else {
-              submitBtn.textContent = 'Connect ' + checked.length + ' Locations';
-            }
-          }
-
-          checkboxes.forEach(cb => cb.addEventListener('change', updateSubmitButton));
-        </script>
       </body>
     </html>
   `);
