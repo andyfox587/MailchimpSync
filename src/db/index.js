@@ -292,16 +292,25 @@ async function findSiteByRestaurantName(restaurantName) {
 
 /**
  * Find all sites for a hospitality group
+ * Matches by exact, fuzzy similarity, and contains (in both directions)
+ * e.g., accountName "Ma'Luz Mexican Grill" will match hospitality_group "Ma'Luz"
+ *       because "Ma'Luz" is contained within "Ma'Luz Mexican Grill"
  */
 async function findSitesByHospitalityGroup(groupName) {
   try {
     const result = await vivaspotQuery(`
-      SELECT * FROM vivaspot_sites 
-      WHERE LOWER(hospitality_group) = LOWER($1)
-      OR similarity(hospitality_group, $1) > 0.5
+      SELECT * FROM vivaspot_sites
+      WHERE hospitality_group IS NOT NULL
+        AND hospitality_group != ''
+        AND (
+          LOWER(hospitality_group) = LOWER($1)
+          OR similarity(hospitality_group, $1) > 0.4
+          OR LOWER($1) LIKE '%' || LOWER(hospitality_group) || '%'
+          OR LOWER(hospitality_group) LIKE '%' || LOWER($1) || '%'
+        )
       ORDER BY restaurant_name
     `, [groupName]);
-    
+
     return result.rows;
   } catch (error) {
     console.error('Error finding sites by hospitality group:', error);
@@ -408,8 +417,8 @@ async function findAllSitesByRestaurantName(restaurantName, threshold = 0.3) {
 
 /**
  * Find all candidate sites for auto-mapping
- * Combines email and name matching strategies
- * Returns { sites: [], matchMethod: 'email'|'name'|'none' }
+ * Combines email, name, and hospitality group matching strategies
+ * Returns { sites: [], matchMethod: 'email'|'name'|'hospitality_group'|'none' }
  */
 async function findCandidateSites(accountName, loginEmail) {
   try {
@@ -427,6 +436,17 @@ async function findCandidateSites(accountName, loginEmail) {
     if (nameMatches.length > 0) {
       console.log(`Found ${nameMatches.length} site(s) by name "${accountName}"`);
       return { sites: nameMatches, matchMethod: 'name' };
+    }
+
+    // Strategy 3: Try hospitality group matching
+    // Useful when the Mailchimp account name is the brand name (e.g., "Ma'Luz Mexican Grill")
+    // but individual sites are stored as "Ma'Luz - Location Name"
+    if (accountName) {
+      const groupMatches = await findSitesByHospitalityGroup(accountName);
+      if (groupMatches.length > 0) {
+        console.log(`Found ${groupMatches.length} site(s) by hospitality group "${accountName}"`);
+        return { sites: groupMatches, matchMethod: 'hospitality_group' };
+      }
     }
 
     // No matches found
