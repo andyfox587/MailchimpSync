@@ -567,7 +567,10 @@ function renderSuccessPage(res, accountName, audienceName, redirectUrl, deviceCo
           <p style="color: #999; font-size: 14px;">
             WiFi guest contacts will now sync automatically to your Mailchimp audience.
           </p>
-          ${redirectUrl ? '<p style="color: #999; font-size: 12px;">Redirecting...</p>' : ''}
+          ${redirectUrl
+            ? '<p style="color: #999; font-size: 12px;">Redirecting...</p>'
+            : '<a href="https://login.mailchimp.com/" style="display: inline-block; margin-top: 20px; padding: 12px 30px; background: #2e7d32; color: white; text-decoration: none; border-radius: 4px; font-size: 16px;">Return to Mailchimp</a>'
+          }
         </div>
       </body>
     </html>
