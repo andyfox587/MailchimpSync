@@ -78,23 +78,9 @@ app.use('/connections', connectionRoutes);
 // Manual setup (fallback when auto-mapping fails)
 app.use('/setup', setupRoutes);
 
-// Root route - basic info
+// Root route - redirect to OAuth flow
 app.get('/', (req, res) => {
-  res.json({
-    name: 'VivaSpot Mailchimp Integration',
-    version: '1.0.0',
-    status: 'running',
-    endpoints: {
-      oauth: {
-        authorize: '/oauth/authorize?mac_address=XX:XX:XX:XX:XX:XX',
-        callback: '/oauth/callback'
-      },
-      webhook: {
-        contact: 'POST /webhook/contact'
-      },
-      health: '/health'
-    }
-  });
+  res.redirect('/oauth/authorize');
 });
 
 // =============================================================================

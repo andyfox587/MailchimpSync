@@ -28,31 +28,28 @@ const mailchimp = require('../services/mailchimp');
 router.get('/authorize', async (req, res) => {
   try {
     const { mac_address, redirect_url } = req.query;
-    
-    if (!mac_address) {
-      return res.status(400).json({ 
-        error: 'Missing required parameter: mac_address' 
-      });
+    const macAddr = mac_address || 'auto';
+
+    // Validate MAC address format (only if a real MAC was provided)
+    if (macAddr !== 'auto') {
+      const macRegex = /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/;
+      if (!macRegex.test(macAddr)) {
+        return res.status(400).json({
+          error: 'Invalid MAC address format. Expected XX:XX:XX:XX:XX:XX'
+        });
+      }
     }
-    
-    // Validate MAC address format
-    const macRegex = /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/;
-    if (!macRegex.test(mac_address)) {
-      return res.status(400).json({ 
-        error: 'Invalid MAC address format. Expected XX:XX:XX:XX:XX:XX' 
-      });
-    }
-    
+
     // Generate random state token for CSRF protection
     const state = crypto.randomBytes(32).toString('hex');
-    
+
     // Store the pending OAuth with MAC address
-    await db.createPendingOAuth(state, mac_address, redirect_url);
-    
+    await db.createPendingOAuth(state, macAddr, redirect_url);
+
     // Generate authorization URL and redirect
     const authUrl = mailchimp.getAuthorizationUrl(state);
-    
-    console.log(`OAuth started for MAC: ${mac_address}`);
+
+    console.log(`OAuth started for MAC: ${macAddr}`);
     res.redirect(authUrl);
     
   } catch (error) {
@@ -477,6 +474,80 @@ router.post('/select-location', express.urlencoded({ extended: true }), async (r
 });
 
 /**
+ * Add a new location manually during OAuth flow
+ * POST /oauth/add-location
+ */
+router.post('/add-location', express.urlencoded({ extended: true }), async (req, res) => {
+  try {
+    const { state, location_name, mac_address, hospitality_group } = req.body;
+
+    if (!state || !location_name || !mac_address) {
+      return res.status(400).json({ error: 'Missing required parameters' });
+    }
+
+    // Validate MAC format
+    const macRegex = /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/;
+    if (!macRegex.test(mac_address)) {
+      return res.status(400).send('Invalid MAC address format. Expected XX:XX:XX:XX:XX:XX');
+    }
+
+    // Get pending OAuth data
+    const result = await db.query(
+      'SELECT * FROM pending_oauth WHERE state = $1 AND expires_at > NOW()',
+      [state]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(400).send('Session expired. Please start again.');
+    }
+
+    const pending = result.rows[0];
+    const {
+      accessToken,
+      metadata,
+      redirect_url,
+      audienceId,
+      audienceName
+    } = JSON.parse(pending.redirect_url);
+
+    // Insert new site into vivaspot_sites
+    await db.vivaspotQuery(`
+      INSERT INTO vivaspot_sites (restaurant_name, hospitality_group, merchant_emails, mac_addresses, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, NOW(), NOW())
+    `, [
+      location_name,
+      hospitality_group || null,
+      metadata.loginEmail ? [metadata.loginEmail.toLowerCase()] : [],
+      [mac_address.toLowerCase()]
+    ]);
+
+    console.log(`Manually added site "${location_name}" with MAC ${mac_address}`);
+
+    // Create mailchimp connection for this MAC
+    await db.upsertConnection({
+      macAddress: mac_address.toLowerCase(),
+      accessToken,
+      dataCenter: metadata.dataCenter,
+      accountId: metadata.accountId,
+      accountName: metadata.accountName,
+      audienceId,
+      audienceName,
+      sourceTag: location_name
+    });
+
+    // Clean up pending OAuth
+    await db.query('DELETE FROM pending_oauth WHERE state = $1', [state]);
+
+    // Show success
+    renderSuccessPage(res, metadata.accountName, audienceName, redirect_url, 1, location_name);
+
+  } catch (error) {
+    console.error('Add location error:', error);
+    res.status(500).send('Failed to add location. Please try again.');
+  }
+});
+
+/**
  * Get OAuth status for a MAC address
  * GET /oauth/status/:mac_address
  */
@@ -718,9 +789,37 @@ function renderLocationSelectionPage(res, sites, state, accountName, matchMethod
             </button>
           </form>
 
-          <p style="color: #999; font-size: 12px; margin-top: 20px; text-align: center;">
-            Don't see your location? Contact support for assistance.
-          </p>
+          <div style="margin-top: 20px; text-align: center;">
+            <a href="#" onclick="document.getElementById('manual-entry').style.display='block'; this.style.display='none'; return false;"
+               style="color: #666; font-size: 13px;">
+              My location isn't listed
+            </a>
+          </div>
+
+          <div id="manual-entry" style="display: none; margin-top: 20px; border-top: 1px solid #ddd; padding-top: 20px;">
+            <h3 style="margin-top: 0;">Add Your Location</h3>
+            <form method="POST" action="/oauth/add-location">
+              <input type="hidden" name="state" value="${state}">
+              <input type="hidden" name="hospitality_group" value="${sites[0]?.hospitality_group || ''}">
+              <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: bold;">Location Name</label>
+                <input type="text" name="location_name" required placeholder="e.g., My Restaurant - Downtown"
+                       style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box;">
+              </div>
+              <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: bold;">Device MAC Address</label>
+                <input type="text" name="mac_address" required placeholder="XX:XX:XX:XX:XX:XX"
+                       pattern="^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$"
+                       style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box;">
+                <p style="color: #999; font-size: 11px; margin-top: 4px;">
+                  Found on the bottom of your VivaSpot device
+                </p>
+              </div>
+              <button type="submit" style="width: 100%; padding: 15px; background: #28a745; color: white; border: none; border-radius: 4px; font-size: 16px; cursor: pointer;">
+                Add &amp; Connect Location
+              </button>
+            </form>
+          </div>
         </div>
       </body>
     </html>
