@@ -181,8 +181,27 @@ const migrations = [
   {
     name: 'alter_connections_audience_name',
     sql: `
-      ALTER TABLE mailchimp_connections 
+      ALTER TABLE mailchimp_connections
       ALTER COLUMN audience_name TYPE TEXT;
+    `
+  },
+
+  // Track state consumption (soft-delete) so we can distinguish
+  // recently-used / expired / not-found in the callback error page.
+  {
+    name: 'add_pending_oauth_consumed_at',
+    sql: `
+      ALTER TABLE pending_oauth
+      ADD COLUMN IF NOT EXISTS consumed_at TIMESTAMP WITH TIME ZONE;
+    `
+  },
+
+  // Index to make the "did we recently consume this state?" lookup cheap
+  {
+    name: 'create_pending_oauth_consumed_at_index',
+    sql: `
+      CREATE INDEX IF NOT EXISTS idx_pending_oauth_consumed_at
+      ON pending_oauth(consumed_at);
     `
   }
 ];
