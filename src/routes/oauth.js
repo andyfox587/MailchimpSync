@@ -21,21 +21,94 @@ const router = express.Router();
 const db = require('../db');
 const mailchimp = require('../services/mailchimp');
 
+// =============================================================================
+// Diagnostic helpers
+// =============================================================================
+
+// Short ref shown to users on error pages so they can quote it back and we
+// can grep every log line for one OAuth attempt.
+function newRefId() {
+  return crypto.randomBytes(3).toString('hex'); // 6 hex chars, e.g. "a3f29b"
+}
+
+// Never log the raw state — it's a CSRF token. Hash for correlation only.
+function hashState(state) {
+  if (!state) return null;
+  return crypto.createHash('sha256').update(state).digest('hex').slice(0, 12);
+}
+
+function logEvent(event, fields) {
+  try {
+    console.log(JSON.stringify({ event, ts: new Date().toISOString(), ...fields }));
+  } catch {
+    // never let logging crash a request
+    console.log(`[${event}]`, fields);
+  }
+}
+
+function requestFingerprint(req) {
+  return {
+    ip: req.ip || req.headers['x-forwarded-for'] || null,
+    ua: req.get('user-agent') || null,
+    referer: req.get('referer') || null,
+  };
+}
+
+// User agents that pre-fetch links (corporate safe-link scanners, chat
+// unfurlers, browser prefetchers). If one of these hits /oauth/callback it
+// would otherwise consume the single-use state and break the real user's flow.
+const LINK_CHECKER_UA_PATTERNS = [
+  /Slackbot-LinkExpanding/i,
+  /\bSlackbot\b/i,
+  /Slack-ImgProxy/i,
+  /facebookexternalhit/i,
+  /Twitterbot/i,
+  /LinkedInBot/i,
+  /WhatsApp/i,
+  /TelegramBot/i,
+  /Discordbot/i,
+  /Mattermost-Bot/i,
+  /SkypeUriPreview/i,
+  /Microsoft Office/i,
+  /OfficeProtect/i,
+  /BingPreview/i,
+  /YandexBot/i,
+  /Google-Safety/i,
+  /GoogleImageProxy/i,
+  /MSOffice/i,
+  /Outlook-iOS/i,
+  /Outlook-Android/i,
+  /safelinks/i,
+];
+
+function isLinkCheckerUA(ua) {
+  if (!ua) return false;
+  return LINK_CHECKER_UA_PATTERNS.some((pat) => pat.test(ua));
+}
+
 /**
  * Start OAuth flow
  * GET /oauth/authorize?mac_address=XX:XX:XX:XX:XX:XX&redirect_url=https://...
  */
 router.get('/authorize', async (req, res) => {
+  const refId = newRefId();
   try {
     const { mac_address, redirect_url } = req.query;
-    const macAddr = mac_address || 'auto';
 
-    // Validate MAC address format (only if a real MAC was provided)
-    if (macAddr !== 'auto') {
-      const macRegex = /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/;
-      if (!macRegex.test(macAddr)) {
+    // Normalize whatever the caller passed (colons, dashes, dots, or no
+    // separator) into the canonical XX:XX:XX:XX:XX:XX lowercase form. The
+    // manual setup form already accepts all of these; keep /oauth/authorize
+    // consistent.
+    let macAddr = 'auto';
+    if (mac_address) {
+      const clean = String(mac_address).replace(/[:\-.\s]/g, '').toLowerCase();
+      if (clean.length === 12 && /^[0-9a-f]+$/.test(clean)) {
+        macAddr = clean.match(/.{2}/g).join(':');
+      } else {
         return res.status(400).json({
-          error: 'Invalid MAC address format. Expected XX:XX:XX:XX:XX:XX'
+          error: 'Invalid MAC address. Expected 12 hex characters (e.g. XX:XX:XX:XX:XX:XX, XX-XX-XX-XX-XX-XX, or XXXXXXXXXXXX). Omit the parameter entirely to start without a MAC.',
+          received: mac_address,
+          ref_id: refId,
         });
       }
     }
@@ -49,11 +122,21 @@ router.get('/authorize', async (req, res) => {
     // Generate authorization URL and redirect
     const authUrl = mailchimp.getAuthorizationUrl(state);
 
-    console.log(`OAuth started for MAC: ${macAddr}`);
+    logEvent('oauth.start', {
+      ref_id: refId,
+      mac: macAddr,
+      state_hash: hashState(state),
+      has_redirect_url: !!redirect_url,
+      ...requestFingerprint(req),
+    });
     res.redirect(authUrl);
-    
+
   } catch (error) {
-    console.error('OAuth authorize error:', error);
+    logEvent('oauth.start.error', {
+      ref_id: refId,
+      message: error.message,
+      ...requestFingerprint(req),
+    });
     res.status(500).json({ error: 'Failed to start OAuth flow' });
   }
 });
@@ -63,44 +146,107 @@ router.get('/authorize', async (req, res) => {
  * GET /oauth/callback?code=xxx&state=xxx
  */
 router.get('/callback', async (req, res) => {
+  const refId = newRefId();
+
+  // Belt-and-braces: link prefetchers / safe-link scanners get an inert page
+  // so they can't consume the single-use state ahead of the real user.
+  if (isLinkCheckerUA(req.get('user-agent'))) {
+    logEvent('oauth.callback.bot_skipped', {
+      ref_id: refId,
+      ...requestFingerprint(req),
+    });
+    return res.status(200).send('<!doctype html><title>VivaSpot OAuth</title>');
+  }
+
   try {
     const { code, state, error: oauthError } = req.query;
-    
+
+    logEvent('oauth.callback', {
+      ref_id: refId,
+      state_hash: hashState(state),
+      has_code: !!code,
+      oauth_error: oauthError || null,
+      ...requestFingerprint(req),
+    });
+
     // Check for OAuth errors
     if (oauthError) {
-      console.error('OAuth error from Mailchimp:', oauthError);
+      logEvent('oauth.callback.mailchimp_error', { ref_id: refId, oauth_error: oauthError });
       return res.status(400).send(`
         <html>
           <body style="font-family: Arial, sans-serif; padding: 40px; text-align: center;">
             <h1>Authorization Failed</h1>
             <p>Mailchimp returned an error: ${oauthError}</p>
             <p>Please try again or contact support.</p>
+            <p style="color:#999;font-size:12px;margin-top:30px;">Ref: ${refId}</p>
           </body>
         </html>
       `);
     }
-    
+
     if (!code || !state) {
-      return res.status(400).json({ 
-        error: 'Missing required parameters: code and state' 
+      logEvent('oauth.callback.bad_params', {
+        ref_id: refId, has_code: !!code, has_state: !!state,
+      });
+      return res.status(400).json({
+        error: 'Missing required parameters: code and state',
+        ref_id: refId,
       });
     }
-    
-    // Retrieve and validate the pending OAuth state
-    const pendingOAuth = await db.consumePendingOAuth(state);
-    
-    if (!pendingOAuth) {
-      return res.status(400).send(`
-        <html>
-          <body style="font-family: Arial, sans-serif; padding: 40px; text-align: center;">
-            <h1>Authorization Expired</h1>
-            <p>This authorization link has expired or was already used.</p>
-            <p>Please start the connection process again.</p>
-          </body>
-        </html>
-      `);
+
+    // Atomically consume the pending OAuth state. The result tells us *why*
+    // a state is unavailable so we can show the right page (and so the next
+    // incident is diagnosable from logs).
+    const consumeResult = await db.consumePendingOAuth(state);
+    logEvent('oauth.consume', {
+      ref_id: refId,
+      state_hash: hashState(state),
+      status: consumeResult.status,
+      age_seconds: consumeResult.ageSeconds ?? null,
+    });
+
+    if (consumeResult.status !== 'consumed') {
+      // For 'recently_used' (prefetch / double-submit), render the success
+      // page if we can find a connection that was already created for this
+      // state's MAC. This is the idempotent path.
+      if (consumeResult.status === 'recently_used' && consumeResult.row) {
+        const macFromState = consumeResult.row.mac_address;
+        if (macFromState && macFromState !== 'auto') {
+          const existing = await db.getConnectionByMac(macFromState);
+          if (existing) {
+            logEvent('oauth.callback.idempotent_success', {
+              ref_id: refId,
+              mac: macFromState,
+            });
+            // Best-effort recover redirect_url; the redirect_url column may
+            // hold either a plain URL or the JSON blob the multi-audience
+            // flow stuffs in there.
+            let originalRedirect = null;
+            try {
+              const parsed = JSON.parse(consumeResult.row.redirect_url || 'null');
+              originalRedirect = (parsed && parsed.redirect_url) || null;
+            } catch {
+              originalRedirect = consumeResult.row.redirect_url || null;
+            }
+            return renderSuccessPage(
+              res,
+              existing.account_name,
+              existing.audience_name,
+              originalRedirect,
+              1,
+              existing.source_tag || null
+            );
+          }
+        }
+        // recently_used but we can't reconstruct — show a friendly "already
+        // connected" page instead of the scary expired one.
+        return renderAlreadyConnectedPage(res, refId);
+      }
+
+      return renderAuthorizationProblemPage(res, consumeResult.status, refId);
     }
-    
+
+    const pendingOAuth = consumeResult.row;
     const { mac_address, redirect_url } = pendingOAuth;
     
     // Exchange code for access token
@@ -248,13 +394,18 @@ router.get('/callback', async (req, res) => {
     renderAudienceSelectionPage(res, audiences, selectionState, metadata.accountName);
     
   } catch (error) {
-    console.error('OAuth callback error:', error);
+    logEvent('oauth.callback.error', {
+      ref_id: refId,
+      message: error.message,
+      stack: error.stack,
+    });
     res.status(500).send(`
       <html>
         <body style="font-family: Arial, sans-serif; padding: 40px; text-align: center;">
           <h1>Connection Failed</h1>
           <p>An error occurred while connecting to Mailchimp: ${error.message}</p>
           <p>Please try again or contact support.</p>
+          <p style="color:#999;font-size:12px;margin-top:30px;">Ref: ${refId}</p>
         </body>
       </html>
     `);
@@ -642,6 +793,61 @@ function renderSuccessPage(res, accountName, audienceName, redirectUrl, deviceCo
             ? '<p style="color: #999; font-size: 12px;">Redirecting...</p>'
             : '<a href="https://login.mailchimp.com/" style="display: inline-block; margin-top: 20px; padding: 12px 30px; background: #2e7d32; color: white; text-decoration: none; border-radius: 4px; font-size: 16px;">Return to Mailchimp</a>'
           }
+        </div>
+      </body>
+    </html>
+  `);
+}
+
+function renderAlreadyConnectedPage(res, refId) {
+  res.status(200).send(`
+    <html>
+      <head><title>Already Connected - VivaSpot</title></head>
+      <body style="font-family: Arial, sans-serif; padding: 40px; text-align: center; background: #f5f5f5;">
+        <div style="max-width: 500px; margin: 0 auto; background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+          <div style="font-size: 60px; margin-bottom: 20px;">&#10003;</div>
+          <h1 style="color: #2e7d32;">You're Already Connected</h1>
+          <p style="color: #666; font-size: 16px;">
+            This Mailchimp connection has already been completed. WiFi guest contacts will sync automatically.
+          </p>
+          <a href="https://login.mailchimp.com/" style="display: inline-block; margin-top: 20px; padding: 12px 30px; background: #2e7d32; color: white; text-decoration: none; border-radius: 4px; font-size: 16px;">Return to Mailchimp</a>
+          <p style="color:#999;font-size:12px;margin-top:30px;">Ref: ${refId}</p>
+        </div>
+      </body>
+    </html>
+  `);
+}
+
+function renderAuthorizationProblemPage(res, status, refId) {
+  // Status-specific copy so the user (and we) know what to do next.
+  const variants = {
+    expired: {
+      title: 'Authorization Link Expired',
+      body: 'This authorization link has expired. Authorization links are valid for 10 minutes after you start the connection. Please start the connection process again.',
+    },
+    already_used: {
+      title: 'Link Already Used',
+      body: 'This authorization link has already been used to connect a Mailchimp account. If you need to connect another location, please start a new connection.',
+    },
+    not_found: {
+      title: 'Authorization Link Not Found',
+      body: 'We couldn\'t find this authorization request. The link may be from a previous session or have been cleaned up. Please start the connection process again.',
+    },
+  };
+  const { title, body } = variants[status] || variants.not_found;
+
+  res.status(400).send(`
+    <html>
+      <head><title>${title} - VivaSpot</title></head>
+      <body style="font-family: Arial, sans-serif; padding: 40px; text-align: center; background: #f5f5f5;">
+        <div style="max-width: 500px; margin: 0 auto; background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+          <h1 style="color: #c62828;">${title}</h1>
+          <p style="color: #666; font-size: 16px; margin: 20px 0;">${body}</p>
+          <a href="/oauth/authorize" style="display: inline-block; margin-top: 20px; padding: 12px 30px; background: #007bff; color: white; text-decoration: none; border-radius: 4px; font-size: 16px;">Start Over</a>
+          <p style="color: #999; font-size: 13px; margin-top: 30px;">
+            Need help? Contact <a href="mailto:support@vivaspot.com">support@vivaspot.com</a> and include the reference code below.
+          </p>
+          <p style="color:#999;font-size:12px;margin-top:10px;">Ref: ${refId}</p>
         </div>
       </body>
     </html>

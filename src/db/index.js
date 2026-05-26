@@ -475,26 +475,81 @@ async function createPendingOAuth(state, macAddress, redirectUrl = null) {
   return result.rows[0];
 }
 
+// How long a freshly-consumed state remains queryable for idempotent retries
+// (browser prefetch / safe-link scanner double-hits the callback). Long enough
+// to cover a slow re-load, short enough that it doesn't change CSRF semantics.
+const RECENTLY_USED_WINDOW_SECONDS = 60;
+
 /**
- * Get and delete pending OAuth state
+ * Atomically consume a pending OAuth state by marking it consumed_at = NOW().
+ *
+ * Returns { row, status, ageSeconds } where status is one of:
+ *   'consumed'      — first legitimate consume; `row` has the pending data
+ *   'recently_used' — already consumed within RECENTLY_USED_WINDOW_SECONDS;
+ *                      `row` is the original row (so the caller can render the
+ *                      success page idempotently)
+ *   'already_used'  — consumed longer ago than the grace window
+ *   'expired'       — never consumed, but expires_at has passed
+ *   'not_found'     — no such state (cleaned up or never existed)
+ *
+ * `ageSeconds` is the seconds since the row's most relevant timestamp:
+ * `consumed_at` for *_used statuses, `expires_at` for expired, undefined otherwise.
  */
 async function consumePendingOAuth(state) {
-  const result = await query(`
-    DELETE FROM pending_oauth 
-    WHERE state = $1 AND expires_at > NOW()
+  // Try to atomically claim the row. Only succeeds if it hasn't been
+  // consumed yet AND hasn't expired.
+  const claim = await query(`
+    UPDATE pending_oauth
+    SET consumed_at = NOW()
+    WHERE state = $1 AND consumed_at IS NULL AND expires_at > NOW()
     RETURNING *
   `, [state]);
-  
-  return result.rows[0] || null;
+
+  if (claim.rows[0]) {
+    return { row: claim.rows[0], status: 'consumed' };
+  }
+
+  // Claim failed — classify why.
+  const lookup = await query(`
+    SELECT *,
+           EXTRACT(EPOCH FROM (NOW() - consumed_at)) AS consumed_age_seconds,
+           EXTRACT(EPOCH FROM (NOW() - expires_at)) AS expired_age_seconds
+    FROM pending_oauth
+    WHERE state = $1
+  `, [state]);
+
+  if (lookup.rows.length === 0) {
+    return { row: null, status: 'not_found' };
+  }
+
+  const row = lookup.rows[0];
+
+  if (row.consumed_at) {
+    const age = Number(row.consumed_age_seconds);
+    if (age <= RECENTLY_USED_WINDOW_SECONDS) {
+      return { row, status: 'recently_used', ageSeconds: age };
+    }
+    return { row, status: 'already_used', ageSeconds: age };
+  }
+
+  return {
+    row,
+    status: 'expired',
+    ageSeconds: Number(row.expired_age_seconds),
+  };
 }
 
 /**
- * Clean up expired pending OAuth states
+ * Clean up expired or long-consumed pending OAuth states.
+ * Keeps consumed rows for 24h so we can render the idempotent success page
+ * and grep logs against state_hash for that window.
  */
 async function cleanupExpiredOAuth() {
-  const result = await query(
-    'DELETE FROM pending_oauth WHERE expires_at < NOW()'
-  );
+  const result = await query(`
+    DELETE FROM pending_oauth
+    WHERE (consumed_at IS NULL AND expires_at < NOW())
+       OR (consumed_at IS NOT NULL AND consumed_at < NOW() - INTERVAL '24 hours')
+  `);
   return result.rowCount;
 }
 
