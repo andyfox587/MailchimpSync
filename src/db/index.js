@@ -580,6 +580,178 @@ async function getRecentSyncLogs(limit = 100) {
   return result.rows;
 }
 
+// =============================================================================
+// Klaviyo Connection Operations
+// =============================================================================
+
+/**
+ * Store a pending OAuth that carries a PKCE code_verifier (Klaviyo flow).
+ * Mirrors createPendingOAuth but persists the verifier so the callback can
+ * complete the token exchange.
+ */
+async function createPendingKlaviyoOAuth(state, macAddress, redirectUrl, codeVerifier) {
+  const result = await query(`
+    INSERT INTO pending_oauth (state, mac_address, redirect_url, code_verifier, expires_at)
+    VALUES ($1, $2, $3, $4, NOW() + INTERVAL '10 minutes')
+    RETURNING *
+  `, [state, macAddress, redirectUrl, codeVerifier]);
+
+  return result.rows[0];
+}
+
+/**
+ * Create or update a Klaviyo connection for a MAC address.
+ */
+async function upsertKlaviyoConnection({
+  macAddress,
+  accessToken,
+  refreshToken,
+  tokenExpiresAt,
+  accountId,
+  accountName,
+  loginEmail,
+  listId,
+  listName,
+  sourceTag,
+}) {
+  const result = await query(`
+    INSERT INTO klaviyo_connections (
+      mac_address, access_token, refresh_token, token_expires_at,
+      account_id, account_name, login_email, list_id, list_name, source_tag, updated_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+    ON CONFLICT (mac_address)
+    DO UPDATE SET
+      access_token = EXCLUDED.access_token,
+      refresh_token = EXCLUDED.refresh_token,
+      token_expires_at = EXCLUDED.token_expires_at,
+      account_id = EXCLUDED.account_id,
+      account_name = EXCLUDED.account_name,
+      login_email = EXCLUDED.login_email,
+      list_id = EXCLUDED.list_id,
+      list_name = EXCLUDED.list_name,
+      source_tag = EXCLUDED.source_tag,
+      updated_at = NOW()
+    RETURNING *
+  `, [
+    macAddress, accessToken, refreshToken, tokenExpiresAt,
+    accountId, accountName, loginEmail, listId, listName, sourceTag,
+  ]);
+
+  return result.rows[0];
+}
+
+/**
+ * Bulk upsert Klaviyo connections (one per MAC) in a transaction.
+ */
+async function bulkUpsertKlaviyoConnections(connections) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const results = [];
+    for (const conn of connections) {
+      const result = await client.query(`
+        INSERT INTO klaviyo_connections (
+          mac_address, access_token, refresh_token, token_expires_at,
+          account_id, account_name, login_email, list_id, list_name, source_tag, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+        ON CONFLICT (mac_address)
+        DO UPDATE SET
+          access_token = EXCLUDED.access_token,
+          refresh_token = EXCLUDED.refresh_token,
+          token_expires_at = EXCLUDED.token_expires_at,
+          account_id = EXCLUDED.account_id,
+          account_name = EXCLUDED.account_name,
+          login_email = EXCLUDED.login_email,
+          list_id = EXCLUDED.list_id,
+          list_name = EXCLUDED.list_name,
+          source_tag = EXCLUDED.source_tag,
+          updated_at = NOW()
+        RETURNING *
+      `, [
+        conn.macAddress, conn.accessToken, conn.refreshToken, conn.tokenExpiresAt,
+        conn.accountId, conn.accountName, conn.loginEmail, conn.listId, conn.listName, conn.sourceTag,
+      ]);
+      results.push(result.rows[0]);
+    }
+
+    await client.query('COMMIT');
+    return results;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Get Klaviyo connection by MAC address (case-insensitive).
+ */
+async function getKlaviyoConnectionByMac(macAddress) {
+  const result = await query(
+    'SELECT * FROM klaviyo_connections WHERE LOWER(mac_address) = LOWER($1)',
+    [macAddress]
+  );
+  return result.rows[0] || null;
+}
+
+/**
+ * Update stored tokens after a refresh. Updates every MAC row that shares the
+ * same Klaviyo account (one OAuth install can map to many devices).
+ */
+async function updateKlaviyoTokens(accountId, { accessToken, refreshToken, tokenExpiresAt }) {
+  const result = await query(`
+    UPDATE klaviyo_connections
+    SET access_token = $1,
+        refresh_token = $2,
+        token_expires_at = $3,
+        updated_at = NOW()
+    WHERE account_id = $4
+    RETURNING *
+  `, [accessToken, refreshToken, tokenExpiresAt, accountId]);
+
+  return result.rows;
+}
+
+/**
+ * All Klaviyo connections (admin listing).
+ */
+async function getAllKlaviyoConnections() {
+  const result = await query(
+    `SELECT id, mac_address, account_name, list_name, source_tag, token_expires_at, created_at, updated_at
+     FROM klaviyo_connections ORDER BY updated_at DESC`
+  );
+  return result.rows;
+}
+
+/**
+ * Delete a Klaviyo connection by MAC address.
+ */
+async function deleteKlaviyoConnection(macAddress) {
+  const result = await query(
+    'DELETE FROM klaviyo_connections WHERE mac_address = $1 RETURNING *',
+    [macAddress]
+  );
+  return result.rows[0] || null;
+}
+
+/**
+ * Fuzzy-match Klaviyo connections by account name (webhook auto-mapping).
+ */
+async function findKlaviyoConnectionsByAccountName(searchName, threshold = 0.3) {
+  const result = await query(`
+    SELECT *,
+           similarity(account_name, $1) as match_score
+    FROM klaviyo_connections
+    WHERE similarity(account_name, $1) > $2
+    ORDER BY match_score DESC
+    LIMIT 5
+  `, [searchName, threshold]);
+
+  return result.rows;
+}
+
 module.exports = {
   pool,
   vivaspotPool,
@@ -587,7 +759,7 @@ module.exports = {
   vivaspotQuery,
   getClient,
   testConnection,
-  
+
   // Connections
   upsertConnection,
   bulkUpsertConnections,
@@ -596,7 +768,7 @@ module.exports = {
   getAllConnections,
   deleteConnection,
   findConnectionsByAccountName,
-  
+
   // VivaSpot Sites
   findSiteByRestaurantName,
   findSitesByHospitalityGroup,
@@ -604,12 +776,22 @@ module.exports = {
   findAllSitesByEmail,
   findAllSitesByRestaurantName,
   findCandidateSites,
-  
+
   // OAuth
   createPendingOAuth,
   consumePendingOAuth,
   cleanupExpiredOAuth,
-  
+
+  // Klaviyo
+  createPendingKlaviyoOAuth,
+  upsertKlaviyoConnection,
+  bulkUpsertKlaviyoConnections,
+  getKlaviyoConnectionByMac,
+  updateKlaviyoTokens,
+  getAllKlaviyoConnections,
+  deleteKlaviyoConnection,
+  findKlaviyoConnectionsByAccountName,
+
   // Sync logs
   logSync,
   getRecentSyncLogs,

@@ -203,6 +203,68 @@ const migrations = [
       CREATE INDEX IF NOT EXISTS idx_pending_oauth_consumed_at
       ON pending_oauth(consumed_at);
     `
+  },
+
+  // PKCE code_verifier for the Klaviyo OAuth flow (Klaviyo requires PKCE).
+  // Nullable so the existing Mailchimp flow is unaffected.
+  {
+    name: 'add_pending_oauth_code_verifier',
+    sql: `
+      ALTER TABLE pending_oauth
+      ADD COLUMN IF NOT EXISTS code_verifier TEXT;
+    `
+  },
+
+  // Klaviyo connections — parallel to mailchimp_connections, but Klaviyo
+  // access tokens expire (~1h) so we also store a refresh token and expiry.
+  {
+    name: 'create_klaviyo_connections',
+    sql: `
+      CREATE TABLE IF NOT EXISTS klaviyo_connections (
+        id SERIAL PRIMARY KEY,
+
+        -- VivaSpot location identifier (unique per connection)
+        mac_address VARCHAR(17) NOT NULL UNIQUE,
+
+        -- Klaviyo OAuth credentials
+        access_token TEXT NOT NULL,
+        refresh_token TEXT NOT NULL,
+        token_expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+
+        -- Klaviyo account info (from GET /api/accounts)
+        account_id VARCHAR(50),
+        account_name TEXT,
+        login_email VARCHAR(255),
+
+        -- Target list for syncing contacts
+        list_id VARCHAR(50),
+        list_name TEXT,
+
+        -- Optional tag for multi-restaurant groups (sent as custom_source)
+        source_tag VARCHAR(100),
+
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      );
+    `
+  },
+
+  // Fuzzy match on Klaviyo account name (used for webhook auto-mapping)
+  {
+    name: 'create_klaviyo_account_name_trgm_index',
+    sql: `
+      CREATE INDEX IF NOT EXISTS idx_klaviyo_account_name_trgm
+      ON klaviyo_connections USING gin(account_name gin_trgm_ops);
+    `
+  },
+
+  // Account ID lookups
+  {
+    name: 'create_klaviyo_account_id_index',
+    sql: `
+      CREATE INDEX IF NOT EXISTS idx_klaviyo_account_id
+      ON klaviyo_connections(account_id);
+    `
   }
 ];
 
