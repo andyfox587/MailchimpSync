@@ -17,6 +17,8 @@ const webhookRoutes = require('./routes/webhook');
 const connectionRoutes = require('./routes/connections');
 const healthRoutes = require('./routes/health');
 const setupRoutes = require('./routes/setup');
+const klaviyoRoutes = require('./routes/klaviyo');
+const klaviyoWebhookRoutes = require('./routes/klaviyo-webhook');
 
 // Database
 const db = require('./db');
@@ -45,7 +47,7 @@ const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 100, // limit each IP to 100 requests per windowMs
   message: { error: 'Too many requests, please try again later.' },
-  skip: (req) => req.path.startsWith('/oauth'),
+  skip: (req) => req.path.startsWith('/oauth') || req.path.startsWith('/klaviyo/oauth'),
 });
 app.use(limiter);
 
@@ -70,6 +72,10 @@ app.use('/health', healthRoutes);
 
 // OAuth flow for Mailchimp
 app.use('/oauth', oauthRoutes);
+
+// OAuth flow + webhook for Klaviyo (mount specific webhook path first)
+app.use('/klaviyo/webhook', klaviyoWebhookRoutes);
+app.use('/klaviyo', klaviyoRoutes);
 
 // Webhook endpoint for receiving contacts from n8n CRM Router
 app.use('/webhook', webhookRoutes);
