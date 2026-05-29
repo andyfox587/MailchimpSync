@@ -181,8 +181,18 @@ router.get('/oauth/callback', async (req, res) => {
     );
     return renderListSelectionPage(res, lists, selectionState, metadata.accountName);
   } catch (error) {
-    logEvent('klaviyo.oauth.callback.error', { ref_id: refId, message: error.message, stack: error.stack });
-    return renderProblemPage(res, 'exception', refId, error.message);
+    logEvent('klaviyo.oauth.callback.error', {
+      ref_id: refId,
+      message: error.message,
+      klaviyo_error: error.klaviyoError || null,
+      klaviyo_error_description: error.klaviyoErrorDescription || null,
+      http_status: error.httpStatus || null,
+      stack: error.stack,
+    });
+    const detail = error.klaviyoError
+      ? `${error.message} — Klaviyo said: ${error.klaviyoError}${error.klaviyoErrorDescription ? ' (' + error.klaviyoErrorDescription + ')' : ''}`
+      : error.message;
+    return renderProblemPage(res, 'exception', refId, detail);
   }
 });
 

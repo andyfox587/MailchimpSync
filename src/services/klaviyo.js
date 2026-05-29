@@ -118,8 +118,13 @@ async function exchangeCodeForToken(code, codeVerifier) {
     );
     return normalizeTokenResponse(response.data);
   } catch (error) {
-    console.error('Klaviyo token exchange failed:', error.response?.data || error.message);
-    throw new Error('Failed to exchange code for token');
+    const detail = error.response?.data;
+    console.error('Klaviyo token exchange failed:', detail || error.message);
+    const err = new Error('Failed to exchange code for token');
+    err.klaviyoError = detail?.error || null;
+    err.klaviyoErrorDescription = detail?.error_description || detail?.detail || null;
+    err.httpStatus = error.response?.status || null;
+    throw err;
   }
 }
 
