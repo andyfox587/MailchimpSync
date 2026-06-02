@@ -361,17 +361,24 @@ async function findAllSitesByEmail(email) {
  */
 async function findAllSitesByRestaurantName(restaurantName, threshold = 0.3) {
   try {
-    // Collect matches from different strategies
-    const matches = new Map(); // Use Map to dedupe by site id
-
-    // 1. Exact matches
+    // 1. Exact matches — if ANY exist, return ONLY exact matches.
+    // The fuzzy/contains strategies below are too loose for short, common-word
+    // venue names ("Bar", "Grill", "Ave") and were polluting clean matches
+    // with unrelated bars. Exact-match-wins keeps fuzzy as a safety net for
+    // typos/abbreviations without letting it shadow good matches.
     const exactResult = await vivaspotQuery(`
       SELECT *, 1.0 as match_score, 'exact' as match_type
       FROM vivaspot_sites
       WHERE LOWER(restaurant_name) = LOWER($1)
     `, [restaurantName]);
 
-    exactResult.rows.forEach(row => matches.set(row.id, row));
+    if (exactResult.rows.length > 0) {
+      console.log(`Found ${exactResult.rows.length} exact site match(es) for "${restaurantName}" — skipping fuzzy/contains`);
+      return exactResult.rows;
+    }
+
+    // No exact match — fall back to fuzzy + contains as a safety net.
+    const matches = new Map(); // dedupe by site id
 
     // 2. Fuzzy matches with pg_trgm
     const fuzzyResult = await vivaspotQuery(`
@@ -580,6 +587,28 @@ async function getRecentSyncLogs(limit = 100) {
   return result.rows;
 }
 
+/**
+ * Append an email to a vivaspot_sites row's merchant_emails (lowercased,
+ * deduped). Used after a successful OAuth match to self-populate the site's
+ * merchant emails so future reconnects auto-map by email cleanly without
+ * relying on the looser name-fuzzy fallback. Returns true if a row was
+ * actually updated (i.e. the email was new), false if already present or
+ * the site doesn't exist.
+ */
+async function appendSiteMerchantEmail(siteId, email) {
+  if (!email || !siteId) return false;
+  const normalized = String(email).toLowerCase().trim();
+  if (!normalized) return false;
+  const result = await vivaspotQuery(`
+    UPDATE vivaspot_sites
+    SET merchant_emails = array_append(COALESCE(merchant_emails, ARRAY[]::text[]), $1),
+        updated_at = NOW()
+    WHERE id = $2
+      AND NOT ($1 = ANY(COALESCE(merchant_emails, ARRAY[]::text[])))
+  `, [normalized, siteId]);
+  return result.rowCount > 0;
+}
+
 // =============================================================================
 // Klaviyo Connection Operations
 // =============================================================================
@@ -776,6 +805,7 @@ module.exports = {
   findAllSitesByEmail,
   findAllSitesByRestaurantName,
   findCandidateSites,
+  appendSiteMerchantEmail,
 
   // OAuth
   createPendingOAuth,

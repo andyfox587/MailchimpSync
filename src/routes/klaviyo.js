@@ -218,13 +218,31 @@ router.post('/oauth/select-list', express.urlencoded({ extended: true }), async 
     const { tokens, metadata, redirectUrl } = JSON.parse(result.rows[0].redirect_url);
     await db.query('DELETE FROM pending_oauth WHERE state = $1', [state]);
 
+    // The hidden list_name field sometimes arrives empty (rare browser/JS
+    // edge cases). Fall back to fetching the canonical name from Klaviyo by
+    // id so the stored connection always has a usable display name.
+    const tokensObj = deserializeTokens(tokens);
+    let resolvedName = (list_name || '').trim();
+    if (!resolvedName) {
+      try {
+        const lists = await klaviyo.getLists(tokensObj.accessToken);
+        const found = lists.find((l) => l.id === list_id);
+        if (found) resolvedName = found.name;
+      } catch (e) {
+        logEvent('klaviyo.oauth.list_name_lookup_failed', {
+          ref_id: refId, list_id, message: e.message,
+        });
+      }
+    }
+    if (!resolvedName) resolvedName = '(unnamed list)';
+
     return completeWithList(res, {
       refId,
       macAddress: result.rows[0].mac_address,
       redirectUrl,
-      tokens: deserializeTokens(tokens),
+      tokens: tokensObj,
       metadata,
-      list: { id: list_id, name: list_name },
+      list: { id: list_id, name: resolvedName },
       sourceTag: source_tag || null,
     });
   } catch (error) {
@@ -277,6 +295,10 @@ router.post('/oauth/select-location', express.urlencoded({ extended: true }), as
       sourceTag: sourceTag || site.restaurant_name || null,
     }));
     await db.bulkUpsertKlaviyoConnections(connections);
+
+    // Self-populate the picked site's merchant_emails — see notes in
+    // completeWithList for why.
+    await appendLoginEmailToSite(site.id, metadata.loginEmail, refId);
 
     logEvent('klaviyo.oauth.location_selected', { ref_id: refId, site: site.restaurant_name, devices: connections.length });
     return renderSuccessPage(res, metadata.accountName, listName, redirectUrl, connections.length, site.restaurant_name);
@@ -407,6 +429,12 @@ async function completeWithList(res, { refId, macAddress, redirectUrl, tokens, m
       sourceTag: sourceTag || site.restaurant_name || null,
     }));
     await db.bulkUpsertKlaviyoConnections(connections);
+
+    // Self-populate the site's merchant_emails with the Klaviyo login email
+    // so the next reconnect of this account auto-maps by email (Strategy 1)
+    // instead of falling through to noisier name-fuzzy matching.
+    await appendLoginEmailToSite(site.id, metadata.loginEmail, refId);
+
     logEvent('klaviyo.oauth.automapped', { ref_id: refId, site: site.restaurant_name, method: matchMethod, devices: connections.length });
     return renderSuccessPage(res, metadata.accountName, list.name, redirectUrl, connections.length, site.restaurant_name);
   }
@@ -453,6 +481,30 @@ async function completeWithList(res, { refId, macAddress, redirectUrl, tokens, m
   }
   // No site at all -> manual entry.
   return renderManualLocationPage(res, followupState, metadata.accountName);
+}
+
+// =============================================================================
+// Site enrichment helper
+// =============================================================================
+
+/**
+ * Append the Klaviyo account's login email to the matched site's
+ * merchant_emails (deduped). Best-effort: never blocks the connection flow.
+ */
+async function appendLoginEmailToSite(siteId, loginEmail, refId) {
+  if (!loginEmail) return;
+  try {
+    const appended = await db.appendSiteMerchantEmail(siteId, loginEmail);
+    if (appended) {
+      logEvent('klaviyo.oauth.site_email_added', {
+        ref_id: refId, site_id: siteId, email: loginEmail,
+      });
+    }
+  } catch (e) {
+    logEvent('klaviyo.oauth.site_email_add_failed', {
+      ref_id: refId, site_id: siteId, message: e.message,
+    });
+  }
 }
 
 // =============================================================================
