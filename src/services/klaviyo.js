@@ -118,8 +118,13 @@ async function exchangeCodeForToken(code, codeVerifier) {
     );
     return normalizeTokenResponse(response.data);
   } catch (error) {
-    console.error('Klaviyo token exchange failed:', error.response?.data || error.message);
-    throw new Error('Failed to exchange code for token');
+    const detail = error.response?.data;
+    console.error('Klaviyo token exchange failed:', detail || error.message);
+    const err = new Error('Failed to exchange code for token');
+    err.klaviyoError = detail?.error || null;
+    err.klaviyoErrorDescription = detail?.error_description || detail?.detail || null;
+    err.httpStatus = error.response?.status || null;
+    throw err;
   }
 }
 
@@ -195,23 +200,36 @@ function createClient(accessToken) {
 }
 
 /**
- * Fetch account metadata (id, name, contact email).
- * GET /api/accounts
+ * Fetch account metadata (id, organization name, sender email).
+ * GET /api/accounts/?fields[account]=contact_information
+ *
+ * Per the Klaviyo OpenAPI schema, the account name + primary email live
+ * under attributes.contact_information.{organization_name,default_sender_email}.
+ * The top-level attributes.name / attributes.contact_email used previously
+ * do not exist and produced `undefined`.
  */
 async function getAccountMetadata(accessToken) {
   const client = createClient(accessToken);
   try {
-    const response = await client.get('/accounts/');
+    const response = await client.get('/accounts/', {
+      params: { 'fields[account]': 'contact_information' },
+    });
     const account = response.data.data?.[0];
     if (!account) {
       throw new Error('No account returned');
     }
+    const ci = account.attributes?.contact_information || {};
+    const loginEmail = ci.default_sender_email
+      ? String(ci.default_sender_email).toLowerCase()
+      : null;
     return {
       accountId: account.id,
-      accountName: account.attributes?.contact_email
-        ? account.attributes.organization_name || account.attributes.name || account.attributes.contact_email
-        : account.attributes?.name,
-      loginEmail: account.attributes?.contact_email || null,
+      accountName:
+        ci.organization_name ||
+        ci.default_sender_name ||
+        loginEmail ||
+        `Klaviyo account ${account.id}`,
+      loginEmail,
     };
   } catch (error) {
     console.error('Klaviyo metadata fetch failed:', error.response?.data || error.message);
