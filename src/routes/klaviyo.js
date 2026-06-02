@@ -153,6 +153,8 @@ router.get('/oauth/callback', async (req, res) => {
     logEvent('klaviyo.oauth.exchanged', {
       ref_id: refId,
       account_id: metadata.accountId,
+      account_name: metadata.accountName,
+      login_email: metadata.loginEmail,
       list_count: lists.length,
     });
 
