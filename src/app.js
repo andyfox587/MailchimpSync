@@ -19,6 +19,7 @@ const healthRoutes = require('./routes/health');
 const setupRoutes = require('./routes/setup');
 const klaviyoRoutes = require('./routes/klaviyo');
 const klaviyoWebhookRoutes = require('./routes/klaviyo-webhook');
+const adminSitesRoutes = require('./routes/admin-sites');
 
 // Database
 const db = require('./db');
@@ -85,6 +86,9 @@ app.use('/connections', connectionRoutes);
 
 // Manual setup (fallback when auto-mapping fails)
 app.use('/setup', setupRoutes);
+
+// Admin console for managing vivaspot_sites (HTTP Basic Auth via ADMIN_API_KEY)
+app.use('/admin/sites', adminSitesRoutes);
 
 // Root route - redirect to OAuth flow
 app.get('/', (req, res) => {

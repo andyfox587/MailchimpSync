@@ -588,6 +588,145 @@ async function getRecentSyncLogs(limit = 100) {
 }
 
 /**
+ * Fetch all vivaspot_sites rows with their per-site Mailchimp/Klaviyo
+ * connection counts (used by the /admin/sites list page).
+ * mailchimp_count = number of the site's MACs that are mapped in mailchimp_connections
+ * klaviyo_count   = same for klaviyo_connections
+ * connections may live in a different DB than vivaspot_sites, so this
+ * fetches sites first then joins connection info in JS.
+ */
+async function listVivaspotSitesWithConnectionCounts() {
+  const sitesResult = await vivaspotQuery(`
+    SELECT id, restaurant_name, hospitality_group, mac_addresses,
+           merchant_emails, created_at, updated_at
+    FROM vivaspot_sites
+    ORDER BY updated_at DESC NULLS LAST, restaurant_name ASC
+  `);
+  const sites = sitesResult.rows;
+
+  // Collect every MAC across every site (lowercased, deduped).
+  const macSet = new Set();
+  for (const s of sites) {
+    for (const mac of s.mac_addresses || []) {
+      macSet.add(String(mac).toLowerCase());
+    }
+  }
+  const allMacs = Array.from(macSet);
+  const mailchimpMapped = new Set();
+  const klaviyoMapped = new Set();
+
+  if (allMacs.length > 0) {
+    const mcResult = await query(
+      'SELECT mac_address FROM mailchimp_connections WHERE LOWER(mac_address) = ANY($1)',
+      [allMacs]
+    );
+    mcResult.rows.forEach((r) => mailchimpMapped.add(r.mac_address.toLowerCase()));
+
+    const kvResult = await query(
+      'SELECT mac_address FROM klaviyo_connections WHERE LOWER(mac_address) = ANY($1)',
+      [allMacs]
+    );
+    kvResult.rows.forEach((r) => klaviyoMapped.add(r.mac_address.toLowerCase()));
+  }
+
+  // Annotate each site with connection counts.
+  for (const s of sites) {
+    const macs = (s.mac_addresses || []).map((m) => String(m).toLowerCase());
+    s.total_macs = macs.length;
+    s.mailchimp_count = macs.filter((m) => mailchimpMapped.has(m)).length;
+    s.klaviyo_count = macs.filter((m) => klaviyoMapped.has(m)).length;
+  }
+  return sites;
+}
+
+/**
+ * Normalize a MAC to lowercase XX:XX:XX:XX:XX:XX (accepts colons, dashes,
+ * dots, or none). Returns null if invalid.
+ */
+function normalizeMacAddress(raw) {
+  const clean = String(raw).replace(/[:\-.\s]/g, '').toLowerCase();
+  if (clean.length !== 12 || !/^[0-9a-f]+$/.test(clean)) return null;
+  return clean.match(/.{2}/g).join(':');
+}
+
+/**
+ * Insert a site or append MACs/emails/hospitality_group to an existing row
+ * (matched case-insensitively on restaurant_name). Returns
+ *   { site, action: 'inserted' | 'updated' | 'unchanged' }.
+ */
+async function upsertVivaspotSite({
+  restaurantName,
+  hospitalityGroup,
+  macAddresses = [],
+  merchantEmails = [],
+}) {
+  const name = String(restaurantName || '').trim();
+  if (!name) throw new Error('restaurant_name is required');
+
+  const normalizedMacs = macAddresses
+    .map((m) => normalizeMacAddress(m))
+    .filter((m) => m !== null);
+  const invalidMacs = macAddresses.filter((m) => normalizeMacAddress(m) === null);
+  const normalizedEmails = merchantEmails
+    .map((e) => String(e || '').toLowerCase().trim())
+    .filter((e) => e.length > 0);
+
+  const existing = await vivaspotQuery(
+    'SELECT * FROM vivaspot_sites WHERE LOWER(restaurant_name) = LOWER($1) LIMIT 1',
+    [name]
+  );
+
+  if (existing.rows[0]) {
+    const row = existing.rows[0];
+    const currentMacs = (row.mac_addresses || []).map((m) => m.toLowerCase());
+    const currentEmails = (row.merchant_emails || []).map((e) => e.toLowerCase());
+    const mergedMacs = Array.from(new Set([...currentMacs, ...normalizedMacs]));
+    const mergedEmails = Array.from(new Set([...currentEmails, ...normalizedEmails]));
+
+    const group = hospitalityGroup?.trim() || row.hospitality_group || null;
+
+    const changed =
+      mergedMacs.length !== currentMacs.length ||
+      mergedEmails.length !== currentEmails.length ||
+      group !== row.hospitality_group;
+
+    if (!changed) return { site: row, action: 'unchanged', invalidMacs };
+
+    const updated = await vivaspotQuery(
+      `UPDATE vivaspot_sites
+       SET mac_addresses = $1,
+           merchant_emails = $2,
+           hospitality_group = $3,
+           updated_at = NOW()
+       WHERE id = $4
+       RETURNING *`,
+      [mergedMacs, mergedEmails, group, row.id]
+    );
+    return { site: updated.rows[0], action: 'updated', invalidMacs };
+  }
+
+  const inserted = await vivaspotQuery(
+    `INSERT INTO vivaspot_sites
+       (restaurant_name, hospitality_group, merchant_emails, mac_addresses, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, NOW(), NOW())
+     RETURNING *`,
+    [name, hospitalityGroup?.trim() || null, normalizedEmails, normalizedMacs]
+  );
+  return { site: inserted.rows[0], action: 'inserted', invalidMacs };
+}
+
+/**
+ * Delete a vivaspot_sites row by id. Returns the deleted row or null.
+ */
+async function deleteVivaspotSiteById(id) {
+  const result = await vivaspotQuery(
+    'DELETE FROM vivaspot_sites WHERE id = $1 RETURNING *',
+    [id]
+  );
+  return result.rows[0] || null;
+}
+
+/**
  * Append an email to a vivaspot_sites row's merchant_emails (lowercased,
  * deduped). Used after a successful OAuth match to self-populate the site's
  * merchant emails so future reconnects auto-map by email cleanly without
@@ -806,6 +945,10 @@ module.exports = {
   findAllSitesByRestaurantName,
   findCandidateSites,
   appendSiteMerchantEmail,
+  listVivaspotSitesWithConnectionCounts,
+  upsertVivaspotSite,
+  deleteVivaspotSiteById,
+  normalizeMacAddress,
 
   // OAuth
   createPendingOAuth,
