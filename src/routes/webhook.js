@@ -111,7 +111,8 @@ router.post('/contact', verifySignature, async (req, res) => {
         macAddress: normalizedMac,
         email: email,
         success: false,
-        errorMessage: 'No Mailchimp connection found'
+        errorMessage: 'No Mailchimp connection found',
+        crm: 'mailchimp',
       });
       
       return res.status(404).json({
@@ -154,7 +155,8 @@ router.post('/contact', verifySignature, async (req, res) => {
       macAddress: normalizedMac,
       email: email,
       success: true,
-      errorMessage: null
+      errorMessage: null,
+      crm: 'mailchimp',
     });
     
     console.log(`Contact synced: ${email} -> ${connection.account_name} (${duration}ms)`);
@@ -177,7 +179,8 @@ router.post('/contact', verifySignature, async (req, res) => {
       macAddress: req.body.mac_address,
       email: req.body.email,
       success: false,
-      errorMessage: error.message
+      errorMessage: error.message,
+      crm: 'mailchimp',
     });
     
     res.status(500).json({

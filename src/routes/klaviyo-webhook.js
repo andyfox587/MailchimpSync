@@ -94,7 +94,7 @@ router.post('/contact', verifySignature, async (req, res) => {
     }
 
     if (!connection) {
-      await db.logSync({ macAddress: normalizedMac, email, success: false, errorMessage: 'No Klaviyo connection found' });
+      await db.logSync({ macAddress: normalizedMac, email, success: false, errorMessage: 'No Klaviyo connection found', crm: 'klaviyo' });
       return res.status(404).json({ error: 'No Klaviyo connection found for this location', mac_address: normalizedMac });
     }
 
@@ -118,7 +118,7 @@ router.post('/contact', verifySignature, async (req, res) => {
       accessToken = await getValidAccessToken(connection);
     } catch (tokenErr) {
       if (tokenErr.code === 'INVALID_GRANT') {
-        await db.logSync({ macAddress: normalizedMac, email, success: false, errorMessage: 'Klaviyo app uninstalled' });
+        await db.logSync({ macAddress: normalizedMac, email, success: false, errorMessage: 'Klaviyo app uninstalled', crm: 'klaviyo' });
         return res.status(410).json({ error: 'Klaviyo app was uninstalled for this account. Please reconnect.', account: connection.account_name });
       }
       throw tokenErr;
@@ -127,7 +127,7 @@ router.post('/contact', verifySignature, async (req, res) => {
     const result = await klaviyo.syncContact(accessToken, connection.list_id, contact, customSource);
     const duration = Date.now() - startTime;
 
-    await db.logSync({ macAddress: normalizedMac, email, success: true, errorMessage: null });
+    await db.logSync({ macAddress: normalizedMac, email, success: true, errorMessage: null, crm: 'klaviyo' });
     console.log(`Klaviyo contact synced: ${email} -> ${connection.account_name} (${duration}ms)`);
 
     res.json({
@@ -141,7 +141,7 @@ router.post('/contact', verifySignature, async (req, res) => {
     });
   } catch (error) {
     console.error('Klaviyo contact sync error:', error.message);
-    await db.logSync({ macAddress: req.body.mac_address, email: req.body.email, success: false, errorMessage: error.message });
+    await db.logSync({ macAddress: req.body.mac_address, email: req.body.email, success: false, errorMessage: error.message, crm: 'klaviyo' });
     res.status(500).json({ error: 'Failed to sync contact', message: error.message });
   }
 });
