@@ -125,8 +125,14 @@ async function findPersonByEmail(apiKey, baseUrl, email) {
 
 /**
  * Build the person JSON body expected by Infobip's People API v2.
+ *
+ * Note on tags: Infobip's People API accepts tags as an **array of tag name
+ * strings** in the create body. The `{id: N}` object form is rejected with
+ * a 400 Bad Request. Confirmed via direct API testing 2026-07-09.
+ * The referenced tag must already exist (create it separately via
+ * POST /people/2/tags if needed).
  */
-function buildPersonBody(contact, tagIds = []) {
+function buildPersonBody(contact, tagNames = []) {
   const body = {};
   if (contact.firstName) body.firstName = String(contact.firstName).trim();
   if (contact.lastName) body.lastName = String(contact.lastName).trim();
@@ -146,60 +152,74 @@ function buildPersonBody(contact, tagIds = []) {
     if (phones.length) body.contactInformation.phone = phones;
   }
 
-  // Tags are references by id in the person body
-  if (Array.isArray(tagIds) && tagIds.length > 0) {
-    body.tags = tagIds.filter((t) => t !== null && t !== undefined).map((id) => ({ id }));
+  const clean = (Array.isArray(tagNames) ? tagNames : [tagNames])
+    .filter((t) => typeof t === 'string' && t.trim().length > 0)
+    .map((t) => t.trim());
+  if (clean.length > 0) {
+    body.tags = clean;
   }
 
   return body;
 }
 
 /**
- * Create or update a person by email. Returns { id, action: 'created'|'updated' }.
+ * Create a person. Individual /persons/{id} endpoints don't exist in this
+ * API — the collection is create-only from the API surface we've explored,
+ * so this is a POST-only path. Infobip may auto-dedupe by email server-side
+ * but that's not documented; either way, our webhook logs one attempt per
+ * capture regardless of dedup behavior downstream.
  */
-async function upsertPerson(apiKey, baseUrl, contact, tagIds = []) {
+async function createPerson(apiKey, baseUrl, contact, tagNames = []) {
   const client = createClient(apiKey, baseUrl);
-  const body = buildPersonBody(contact, tagIds);
-
-  // Try to find first; PATCH if found, POST if not.
-  const existing = await findPersonByEmail(apiKey, baseUrl, contact.email);
-  if (existing && existing.id) {
-    await client.patch(`/${API_VERSION}/persons/${existing.id}`, body);
-    return { id: existing.id, action: 'updated' };
-  }
+  const body = buildPersonBody(contact, tagNames);
 
   try {
     const response = await client.post(`/${API_VERSION}/persons`, body);
-    return { id: response.data?.id || response.data?.person?.id, action: 'created' };
+    return { id: response.data?.id || null, action: 'created' };
   } catch (error) {
-    // Fallback: someone raced us — try lookup + patch
-    const status = error.response?.status;
-    if (status === 409 || status === 400) {
-      const retryFound = await findPersonByEmail(apiKey, baseUrl, contact.email);
-      if (retryFound && retryFound.id) {
-        await client.patch(`/${API_VERSION}/persons/${retryFound.id}`, body);
-        return { id: retryFound.id, action: 'updated' };
-      }
-    }
-    console.error('Infobip person upsert failed:', error.response?.data || error.message);
-    throw new Error(
-      error.response?.data?.requestError?.serviceException?.text ||
-        'Failed to create/update person'
-    );
+    const data = error.response?.data;
+    const detail =
+      data?.requestError?.serviceException?.text ||
+      data?.requestError?.serviceException?.messageId ||
+      error.message;
+    console.error('Infobip person create failed:', data || error.message);
+    const err = new Error(detail || 'Failed to create person');
+    err.infobipError = data || null;
+    err.httpStatus = error.response?.status || null;
+    throw err;
   }
 }
 
+// Alias for callers using the old name.
+async function upsertPerson(apiKey, baseUrl, contact, tagNames = []) {
+  return createPerson(apiKey, baseUrl, contact, tagNames);
+}
+
 /**
- * Full contact sync: ensure the connection's tag exists, then upsert person.
- * If the connection doesn't have a cached tag_id, resolve/create it and let
- * the caller persist the id for next time.
+ * Full contact sync: create the person tagged with the venue.
+ * The tag is created ahead of time by the admin panel (or on first sync
+ * via findOrCreateTagId) so the tag name is guaranteed to exist at
+ * Infobip when we reference it here.
  */
 async function syncContact({ apiKey, baseUrl, contact, tagName, cachedTagId }) {
+  const tagNames = tagName ? [tagName] : [];
+
+  // Best-effort: ensure the tag exists in Infobip before we reference it
+  // by name. If tag_id was already cached on the connection we can skip;
+  // otherwise resolve/create so a fresh admin-panel row that missed the
+  // pre-save tag creation still works.
   let tagId = cachedTagId || null;
   if (!tagId && tagName) {
-    tagId = await findOrCreateTagId(apiKey, baseUrl, tagName);
+    try {
+      tagId = await findOrCreateTagId(apiKey, baseUrl, tagName);
+    } catch (e) {
+      // Non-fatal — the create may still succeed even if we couldn't
+      // pre-verify the tag exists.
+      console.warn('Infobip tag pre-resolve failed:', e.message);
+    }
   }
-  const result = await upsertPerson(apiKey, baseUrl, contact, tagId ? [tagId] : []);
+
+  const result = await createPerson(apiKey, baseUrl, contact, tagNames);
   return { ...result, tagId };
 }
 
@@ -210,7 +230,8 @@ module.exports = {
   createTag,
   findOrCreateTagId,
   findPersonByEmail,
-  upsertPerson,
+  createPerson,
+  upsertPerson, // alias
   syncContact,
   buildPersonBody, // exported for tests
 };
