@@ -162,12 +162,17 @@ function buildPersonBody(contact, tagNames = []) {
   return body;
 }
 
+// Infobip errorCode for "Email address already exists". Not a real failure
+// for us — the person is already in the CRM, which is the outcome we want.
+const ERR_CODE_EMAIL_EXISTS = 40005;
+
 /**
  * Create a person. Individual /persons/{id} endpoints don't exist in this
  * API — the collection is create-only from the API surface we've explored,
- * so this is a POST-only path. Infobip may auto-dedupe by email server-side
- * but that's not documented; either way, our webhook logs one attempt per
- * capture regardless of dedup behavior downstream.
+ * so this is a POST-only path.
+ *
+ * "Email already exists" (errorCode 40005) is treated as a benign non-error
+ * — the person is already in the CRM. Returns { id: null, action: 'already_exists' }.
  */
 async function createPerson(apiKey, baseUrl, contact, tagNames = []) {
   const client = createClient(apiKey, baseUrl);
@@ -178,14 +183,25 @@ async function createPerson(apiKey, baseUrl, contact, tagNames = []) {
     return { id: response.data?.id || null, action: 'created' };
   } catch (error) {
     const data = error.response?.data;
+    const status = error.response?.status;
+
+    // "Email already exists" — not a failure for our use case.
+    if (status === 400 && data?.errorCode === ERR_CODE_EMAIL_EXISTS) {
+      return { id: null, action: 'already_exists' };
+    }
+
+    // Real error — bubble a useful message up. Infobip uses two response
+    // shapes across endpoints, so try both.
     const detail =
+      data?.errorMessage ||
       data?.requestError?.serviceException?.text ||
       data?.requestError?.serviceException?.messageId ||
       error.message;
     console.error('Infobip person create failed:', data || error.message);
     const err = new Error(detail || 'Failed to create person');
     err.infobipError = data || null;
-    err.httpStatus = error.response?.status || null;
+    err.infobipErrorCode = data?.errorCode || null;
+    err.httpStatus = status || null;
     throw err;
   }
 }

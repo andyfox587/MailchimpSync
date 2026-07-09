@@ -105,10 +105,10 @@ router.post('/contact', verifySignature, async (req, res) => {
     res.json({
       success: true,
       email,
-      status: result.action, // 'created' or 'updated'
+      status: result.action, // 'created' | 'already_exists'
       account: connection.account_name,
       tag: connection.source_tag,
-      person_id: result.id,
+      person_id: result.id, // null when already_exists (endpoint returns no id in that path)
       duration_ms: duration,
     });
   } catch (error) {
