@@ -20,6 +20,8 @@ const setupRoutes = require('./routes/setup');
 const klaviyoRoutes = require('./routes/klaviyo');
 const klaviyoWebhookRoutes = require('./routes/klaviyo-webhook');
 const adminSitesRoutes = require('./routes/admin-sites');
+const infobipWebhookRoutes = require('./routes/infobip-webhook');
+const adminInfobipRoutes = require('./routes/admin-infobip');
 
 // Database
 const db = require('./db');
@@ -78,6 +80,9 @@ app.use('/oauth', oauthRoutes);
 app.use('/klaviyo/webhook', klaviyoWebhookRoutes);
 app.use('/klaviyo', klaviyoRoutes);
 
+// Infobip: no OAuth, just a webhook. Admin config via /admin/infobip.
+app.use('/infobip/webhook', infobipWebhookRoutes);
+
 // Webhook endpoint for receiving contacts from n8n CRM Router
 app.use('/webhook', webhookRoutes);
 
@@ -89,6 +94,7 @@ app.use('/setup', setupRoutes);
 
 // Admin console for managing vivaspot_sites (HTTP Basic Auth via ADMIN_API_KEY)
 app.use('/admin/sites', adminSitesRoutes);
+app.use('/admin/infobip', adminInfobipRoutes);
 
 // Root route - redirect to OAuth flow
 app.get('/', (req, res) => {

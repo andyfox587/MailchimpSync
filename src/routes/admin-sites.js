@@ -126,6 +126,7 @@ function renderList(sites, flash) {
           <td style="font-family:monospace;font-size:11px;">${escapeHtml(macs)}</td>
           <td>${renderCrmCell(s.mailchimp_count || 0, s.total_macs || 0, 'MC', s.activity?.mailchimp)}</td>
           <td>${renderCrmCell(s.klaviyo_count || 0, s.total_macs || 0, 'KV', s.activity?.klaviyo)}</td>
+          <td>${renderCrmCell(s.infobip_count || 0, s.total_macs || 0, 'IB', s.activity?.infobip)}</td>
           <td>
             <form method="POST" action="/admin/sites/${s.id}/delete" onsubmit="return confirm('Delete ${escapeHtml(s.restaurant_name).replace(/'/g, "\\'")}? This does not disconnect Mailchimp/Klaviyo.');" style="margin:0;">
               <button type="submit" style="background:#dc3545;color:#fff;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;">Delete</button>
@@ -167,7 +168,7 @@ function renderList(sites, flash) {
 </head>
 <body>
   <h1>VivaSpot Sites Admin</h1>
-  <div class="sub">Manages rows in <code>vivaspot_sites</code>. Used by Mailchimp and Klaviyo OAuth flows for auto-mapping. Also used by the CRM Router webhooks.</div>
+  <div class="sub">Manages rows in <code>vivaspot_sites</code>. Used by Mailchimp and Klaviyo OAuth flows for auto-mapping and by the CRM Router webhooks. &nbsp;·&nbsp; <a href="/admin/infobip">Infobip connections →</a></div>
 
   ${flashBanner}
 
@@ -202,10 +203,10 @@ function renderList(sites, flash) {
     <div style="overflow-x:auto;">
     <table>
       <thead>
-        <tr><th>Name</th><th>Group</th><th>Emails</th><th>MACs</th><th>Mailchimp<div style="font-weight:400;text-transform:none;font-size:10px;color:#999;">status · 30d activity</div></th><th>Klaviyo<div style="font-weight:400;text-transform:none;font-size:10px;color:#999;">status · 30d activity</div></th><th></th></tr>
+        <tr><th>Name</th><th>Group</th><th>Emails</th><th>MACs</th><th>Mailchimp<div style="font-weight:400;text-transform:none;font-size:10px;color:#999;">status · 30d activity</div></th><th>Klaviyo<div style="font-weight:400;text-transform:none;font-size:10px;color:#999;">status · 30d activity</div></th><th>Infobip<div style="font-weight:400;text-transform:none;font-size:10px;color:#999;">status · 30d activity</div></th><th></th></tr>
       </thead>
       <tbody id="site-rows">
-        ${rows || `<tr><td colspan="7" style="text-align:center;color:#999;padding:30px;">No sites yet. Add one above.</td></tr>`}
+        ${rows || `<tr><td colspan="8" style="text-align:center;color:#999;padding:30px;">No sites yet. Add one above.</td></tr>`}
       </tbody>
     </table>
     </div>
