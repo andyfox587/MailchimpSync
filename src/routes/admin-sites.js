@@ -78,6 +78,39 @@ function renderBadge(mapped, total, label) {
   return `<span style="background:#d4edda;color:#155724;padding:2px 8px;border-radius:12px;font-size:12px;">${label} ${mapped}/${total}</span>`;
 }
 
+/**
+ * Compact relative-time string. Same-shape as GitHub / Slack.
+ */
+function relativeTime(dateStr) {
+  if (!dateStr) return 'never';
+  const then = new Date(dateStr).getTime();
+  const now = Date.now();
+  const diff = Math.max(0, (now - then) / 1000);
+  if (diff < 60) return `${Math.floor(diff)}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+
+/**
+ * A single CRM cell = connection badge + rolling-30d activity counters.
+ * `activity` is { ok, err, lastAt } from listVivaspotSitesWithConnectionCounts.
+ */
+function renderCrmCell(mapped, total, label, activity) {
+  const badge = renderBadge(mapped, total, label);
+  const ok = activity?.ok || 0;
+  const err = activity?.err || 0;
+  const lastAt = activity?.lastAt || null;
+
+  if (ok === 0 && err === 0) {
+    return `${badge}<div style="color:#999;font-size:11px;margin-top:4px;">no activity (30d)</div>`;
+  }
+
+  const okStr = `<span style="color:#155724;">${ok.toLocaleString()}&nbsp;✓</span>`;
+  const errStr = err > 0 ? ` &nbsp;<span style="color:#a00;">${err.toLocaleString()}&nbsp;✗</span>` : '';
+  return `${badge}<div style="font-size:12px;margin-top:4px;">${okStr}${errStr}</div><div style="color:#999;font-size:11px;">last ${relativeTime(lastAt)}</div>`;
+}
+
 function renderList(sites, flash) {
   const rows = sites
     .map((s) => {
@@ -91,8 +124,8 @@ function renderList(sites, flash) {
           <td>${escapeHtml(s.hospitality_group || '')}</td>
           <td style="font-size:12px;">${escapeHtml(emails)}</td>
           <td style="font-family:monospace;font-size:11px;">${escapeHtml(macs)}</td>
-          <td>${renderBadge(s.mailchimp_count || 0, s.total_macs || 0, 'MC')}</td>
-          <td>${renderBadge(s.klaviyo_count || 0, s.total_macs || 0, 'KV')}</td>
+          <td>${renderCrmCell(s.mailchimp_count || 0, s.total_macs || 0, 'MC', s.activity?.mailchimp)}</td>
+          <td>${renderCrmCell(s.klaviyo_count || 0, s.total_macs || 0, 'KV', s.activity?.klaviyo)}</td>
           <td>
             <form method="POST" action="/admin/sites/${s.id}/delete" onsubmit="return confirm('Delete ${escapeHtml(s.restaurant_name).replace(/'/g, "\\'")}? This does not disconnect Mailchimp/Klaviyo.');" style="margin:0;">
               <button type="submit" style="background:#dc3545;color:#fff;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;">Delete</button>
@@ -169,7 +202,7 @@ function renderList(sites, flash) {
     <div style="overflow-x:auto;">
     <table>
       <thead>
-        <tr><th>Name</th><th>Group</th><th>Emails</th><th>MACs</th><th>Mailchimp</th><th>Klaviyo</th><th></th></tr>
+        <tr><th>Name</th><th>Group</th><th>Emails</th><th>MACs</th><th>Mailchimp<div style="font-weight:400;text-transform:none;font-size:10px;color:#999;">status · 30d activity</div></th><th>Klaviyo<div style="font-weight:400;text-transform:none;font-size:10px;color:#999;">status · 30d activity</div></th><th></th></tr>
       </thead>
       <tbody id="site-rows">
         ${rows || `<tr><td colspan="7" style="text-align:center;color:#999;padding:30px;">No sites yet. Add one above.</td></tr>`}
@@ -179,9 +212,10 @@ function renderList(sites, flash) {
   </div>
 
   <p style="color:#999;font-size:12px;text-align:center;">
-    Badges: <span style="background:#d4edda;color:#155724;padding:2px 8px;border-radius:12px;">green</span> all MACs mapped ·
+    <strong>Badges:</strong> <span style="background:#d4edda;color:#155724;padding:2px 8px;border-radius:12px;">green</span> all MACs mapped ·
     <span style="background:#fff3cd;color:#856404;padding:2px 8px;border-radius:12px;">yellow</span> partial ·
-    <span style="background:#fee;color:#a00;padding:2px 8px;border-radius:12px;">red</span> none mapped
+    <span style="background:#fee;color:#a00;padding:2px 8px;border-radius:12px;">red</span> none mapped &nbsp;·&nbsp;
+    <strong>Activity:</strong> <span style="color:#155724;">N ✓</span> successful syncs · <span style="color:#a00;">N ✗</span> failures &nbsp;(rolling 30-day window)
   </p>
 
   <script>

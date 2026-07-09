@@ -565,13 +565,54 @@ async function cleanupExpiredOAuth() {
 // =============================================================================
 
 /**
- * Log a contact sync operation
+ * Log a contact sync operation. `crm` distinguishes which downstream
+ * platform this attempt was for ('mailchimp' | 'klaviyo' | future).
+ * Omitted for older callers; NULL is interpreted as 'mailchimp' by the
+ * activity aggregation query.
  */
-async function logSync({ macAddress, email, success, errorMessage = null }) {
+async function logSync({ macAddress, email, success, errorMessage = null, crm = null }) {
   await query(`
-    INSERT INTO sync_log (mac_address, email, success, error_message)
-    VALUES ($1, $2, $3, $4)
-  `, [macAddress, email, success, errorMessage]);
+    INSERT INTO sync_log (mac_address, email, success, error_message, crm)
+    VALUES ($1, $2, $3, $4, $5)
+  `, [macAddress, email, success, errorMessage, crm]);
+}
+
+/**
+ * Fetch per-MAC / per-CRM sync activity for a rolling window (default 30d).
+ * Returns Map<mac_address_lower, { mailchimp: {ok, err, lastAt}, klaviyo: {ok, err, lastAt} }>.
+ * Missing entries mean zero activity for that MAC.
+ */
+async function getSyncActivityByMac(macs, sinceDays = 30) {
+  const map = new Map();
+  if (!macs || macs.length === 0) return map;
+
+  const lowerMacs = macs.map((m) => String(m).toLowerCase());
+  const days = Number.isFinite(sinceDays) && sinceDays > 0 ? Math.floor(sinceDays) : 30;
+
+  const result = await query(`
+    SELECT LOWER(mac_address) AS mac_address,
+           COALESCE(crm, 'mailchimp') AS crm,
+           success,
+           COUNT(*)::int AS count,
+           MAX(created_at) AS last_at
+    FROM sync_log
+    WHERE LOWER(mac_address) = ANY($1)
+      AND created_at >= NOW() - (($2::int || ' days')::interval)
+    GROUP BY LOWER(mac_address), COALESCE(crm, 'mailchimp'), success
+  `, [lowerMacs, days]);
+
+  for (const row of result.rows) {
+    if (!map.has(row.mac_address)) map.set(row.mac_address, {});
+    const bucket = map.get(row.mac_address);
+    if (!bucket[row.crm]) bucket[row.crm] = { ok: 0, err: 0, lastAt: null };
+    const slot = bucket[row.crm];
+    if (row.success) slot.ok = row.count;
+    else slot.err = row.count;
+    if (row.last_at && (!slot.lastAt || row.last_at > slot.lastAt)) {
+      slot.lastAt = row.last_at;
+    }
+  }
+  return map;
 }
 
 /**
@@ -629,12 +670,33 @@ async function listVivaspotSitesWithConnectionCounts() {
     kvResult.rows.forEach((r) => klaviyoMapped.add(r.mac_address.toLowerCase()));
   }
 
-  // Annotate each site with connection counts.
+  // Sync activity for a rolling 30-day window (per-MAC ok/err/lastAt per CRM).
+  const activityMap = await getSyncActivityByMac(allMacs, 30);
+
+  // Annotate each site with connection counts + rolled-up sync activity.
   for (const s of sites) {
     const macs = (s.mac_addresses || []).map((m) => String(m).toLowerCase());
     s.total_macs = macs.length;
     s.mailchimp_count = macs.filter((m) => mailchimpMapped.has(m)).length;
     s.klaviyo_count = macs.filter((m) => klaviyoMapped.has(m)).length;
+
+    s.activity = {
+      mailchimp: { ok: 0, err: 0, lastAt: null },
+      klaviyo: { ok: 0, err: 0, lastAt: null },
+    };
+    for (const mac of macs) {
+      const bucket = activityMap.get(mac);
+      if (!bucket) continue;
+      for (const crm of ['mailchimp', 'klaviyo']) {
+        if (!bucket[crm]) continue;
+        s.activity[crm].ok += bucket[crm].ok || 0;
+        s.activity[crm].err += bucket[crm].err || 0;
+        const cand = bucket[crm].lastAt;
+        if (cand && (!s.activity[crm].lastAt || cand > s.activity[crm].lastAt)) {
+          s.activity[crm].lastAt = cand;
+        }
+      }
+    }
   }
   return sites;
 }
@@ -968,4 +1030,5 @@ module.exports = {
   // Sync logs
   logSync,
   getRecentSyncLogs,
+  getSyncActivityByMac,
 };

@@ -265,6 +265,27 @@ const migrations = [
       CREATE INDEX IF NOT EXISTS idx_klaviyo_account_id
       ON klaviyo_connections(account_id);
     `
+  },
+
+  // Distinguish which CRM a sync_log row was for so the admin console can
+  // count Mailchimp vs Klaviyo traffic per site. NULL for rows written
+  // before this migration — the aggregation query treats those as 'mailchimp'
+  // since Klaviyo only came online recently and prior activity was all MC.
+  {
+    name: 'add_sync_log_crm',
+    sql: `
+      ALTER TABLE sync_log
+      ADD COLUMN IF NOT EXISTS crm VARCHAR(20);
+    `
+  },
+
+  // Composite index makes per-site activity aggregation cheap.
+  {
+    name: 'create_sync_log_mac_crm_created_index',
+    sql: `
+      CREATE INDEX IF NOT EXISTS idx_sync_log_mac_crm_created
+      ON sync_log(mac_address, crm, created_at DESC);
+    `
   }
 ];
 
