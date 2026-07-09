@@ -162,17 +162,38 @@ function buildPersonBody(contact, tagNames = []) {
   return body;
 }
 
-// Infobip errorCode for "Email address already exists". Not a real failure
-// for us — the person is already in the CRM, which is the outcome we want.
+// Infobip errorCodes we treat as "person is already in the CRM" (not a
+// failure for our use case — the outcome we want is met).
 const ERR_CODE_EMAIL_EXISTS = 40005;
+const ERR_CODE_PHONE_EXISTS = 40004;
+const ERR_CODE_ALREADY_EXISTS_SET = new Set([ERR_CODE_EMAIL_EXISTS, ERR_CODE_PHONE_EXISTS]);
+
+// Validation error — the request body has a field that Infobip refuses to
+// accept (usually a malformed phone number). We retry without contact info
+// that's failing validation on the retry path.
+const ERR_CODE_VALIDATION = 40001;
+
+/**
+ * Detect whether an Infobip 400 is caused by an invalid phone number so we
+ * can retry without it. The response shape is:
+ *   { errorCode: 40001, validationErrors: [{ propertyPath: "contacts[0].value", ... }] }
+ */
+function isPhoneValidationError(data) {
+  if (data?.errorCode !== ERR_CODE_VALIDATION) return false;
+  const errs = Array.isArray(data.validationErrors) ? data.validationErrors : [];
+  return errs.some((e) => String(e?.propertyPath || '').startsWith('contacts['));
+}
 
 /**
  * Create a person. Individual /persons/{id} endpoints don't exist in this
  * API — the collection is create-only from the API surface we've explored,
  * so this is a POST-only path.
  *
- * "Email already exists" (errorCode 40005) is treated as a benign non-error
- * — the person is already in the CRM. Returns { id: null, action: 'already_exists' }.
+ * Handles three real production edge cases:
+ *   - errorCode 40005 (email already exists) → already_exists
+ *   - errorCode 40004 (phone already exists) → already_exists
+ *   - errorCode 40001 with a contacts[] validation error (malformed phone)
+ *       → retry once without the phone field
  */
 async function createPerson(apiKey, baseUrl, contact, tagNames = []) {
   const client = createClient(apiKey, baseUrl);
@@ -185,23 +206,42 @@ async function createPerson(apiKey, baseUrl, contact, tagNames = []) {
     const data = error.response?.data;
     const status = error.response?.status;
 
-    // "Email already exists" — not a failure for our use case.
-    if (status === 400 && data?.errorCode === ERR_CODE_EMAIL_EXISTS) {
+    // Already in the CRM (email or phone match) — benign.
+    if (status === 400 && ERR_CODE_ALREADY_EXISTS_SET.has(data?.errorCode)) {
       return { id: null, action: 'already_exists' };
     }
 
+    // Malformed phone number — retry without phone. If we succeed, note that
+    // the phone was dropped so callers can log the compromise.
+    if (status === 400 && isPhoneValidationError(data) && contact.phone) {
+      const bodyNoPhone = buildPersonBody({ ...contact, phone: null }, tagNames);
+      try {
+        const retry = await client.post(`/${API_VERSION}/persons`, bodyNoPhone);
+        return { id: retry.data?.id || null, action: 'created', phoneDropped: true };
+      } catch (retryError) {
+        const retryData = retryError.response?.data;
+        // Even the retry could match on email — still benign.
+        if (retryError.response?.status === 400 && ERR_CODE_ALREADY_EXISTS_SET.has(retryData?.errorCode)) {
+          return { id: null, action: 'already_exists', phoneDropped: true };
+        }
+        // Fall through to the generic failure path below with the retry error
+        error = retryError;
+      }
+    }
+
     // Real error — bubble a useful message up. Infobip uses two response
-    // shapes across endpoints, so try both.
+    // shapes across endpoints; try both.
+    const finalData = error.response?.data;
     const detail =
-      data?.errorMessage ||
-      data?.requestError?.serviceException?.text ||
-      data?.requestError?.serviceException?.messageId ||
+      finalData?.errorMessage ||
+      finalData?.requestError?.serviceException?.text ||
+      finalData?.requestError?.serviceException?.messageId ||
       error.message;
-    console.error('Infobip person create failed:', data || error.message);
+    console.error('Infobip person create failed:', finalData || error.message);
     const err = new Error(detail || 'Failed to create person');
-    err.infobipError = data || null;
-    err.infobipErrorCode = data?.errorCode || null;
-    err.httpStatus = status || null;
+    err.infobipError = finalData || null;
+    err.infobipErrorCode = finalData?.errorCode || null;
+    err.httpStatus = error.response?.status || null;
     throw err;
   }
 }
