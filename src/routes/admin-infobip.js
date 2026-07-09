@@ -77,9 +77,13 @@ function renderPage(connections, accounts, flash) {
       </tr>`)
     .join('');
 
-  const accountOptions = accounts
-    .map((a) => `<option value="${escapeHtml(a.account_name)}" data-api-key="${escapeHtml(a.api_key)}" data-base-url="${escapeHtml(a.base_url)}" data-contact-email="${escapeHtml(a.contact_email || '')}">${escapeHtml(a.account_name)}</option>`)
+  const accountDatalist = accounts
+    .map((a) => `<option value="${escapeHtml(a.account_name)}">`)
     .join('');
+
+  const existingAccountsSummary = accounts.length > 0
+    ? `<div class="help">Existing customers: ${accounts.map((a) => `<code>${escapeHtml(a.account_name)}</code>`).join(' · ')} &nbsp;— type one of those in the Account field to reuse its stored credentials.</div>`
+    : `<div class="help">No customers yet.</div>`;
 
   return `<!doctype html>
 <html>
@@ -96,15 +100,17 @@ function renderPage(connections, accounts, flash) {
     label { display:block; margin: 10px 0 4px 0; font-weight:500; font-size:14px; }
     input[type=text], input[type=password], input[type=email], select { width:100%; padding:8px; border:1px solid #ccc; border-radius:4px; box-sizing:border-box; font-family:inherit; font-size:14px; }
     .help { color:#666; font-size:12px; margin-top:4px; }
+    .help code { background:#eef; padding:1px 4px; border-radius:3px; font-size:12px; }
     button.primary { background:#007bff; color:#fff; border:none; padding:10px 24px; border-radius:4px; cursor:pointer; font-size:15px; margin-top:15px; }
     button.primary:hover { background:#0056b3; }
     table { width:100%; border-collapse: collapse; font-size:14px; }
     th { text-align:left; padding:10px; background:#fafafa; border-bottom:2px solid #eee; font-size:12px; text-transform:uppercase; color:#666; letter-spacing:0.5px; }
     td { padding:10px; border-bottom:1px solid #eee; vertical-align: top; }
     tr:hover td { background:#fafafa; }
-    .toggle-row { display:flex; gap:10px; margin-bottom:15px; }
-    .toggle-row button { padding:8px 16px; border:1px solid #ccc; background:#fff; cursor:pointer; border-radius:4px; }
-    .toggle-row button.active { background:#007bff; color:#fff; border-color:#007bff; }
+    .search { margin-bottom: 15px; }
+    .search input { max-width:400px; }
+    .grid { display:grid; grid-template-columns: 1fr 1fr; gap:15px; }
+    @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -114,72 +120,64 @@ function renderPage(connections, accounts, flash) {
   ${flashBanner}
 
   <div class="card">
-    <div class="toggle-row">
-      <button type="button" id="btn-new-account" class="active" onclick="showForm('new-account')">Add NEW customer</button>
-      <button type="button" id="btn-new-location" onclick="showForm('new-location')">Add new LOCATION for existing customer</button>
-    </div>
+    <fieldset>
+      <legend>Add a Connection</legend>
+      <p style="color:#666;font-size:13px;margin:0 0 10px 0;">
+        Adds one AP MAC as a new Infobip connection. If the Account Name matches an existing customer, the API key + base URL are reused automatically — you only need to fill in the Location Tag and MAC.
+      </p>
 
-    <fieldset id="form-new-account">
-      <legend>New customer + first location</legend>
       <form method="POST" action="/admin/infobip">
-        <input type="hidden" name="mode" value="new-account">
         <label>Account Name <span style="color:#c00">*</span></label>
-        <input type="text" name="account_name" required placeholder="e.g. Roggenart">
-        <div class="help">Groups the customer's multiple locations. Same value on every AP row belonging to this customer.</div>
+        <input type="text" name="account_name" list="accounts-list" required placeholder="Roggenart" autocomplete="off">
+        <datalist id="accounts-list">${accountDatalist}</datalist>
+        ${existingAccountsSummary}
 
-        <label>Contact Email</label>
-        <input type="email" name="contact_email" placeholder="andy@roggenart.com">
+        <div class="grid">
+          <div>
+            <label>Location Tag <span style="color:#c00">*</span></label>
+            <input type="text" name="source_tag" required placeholder="Roggenart - Baltimore" autocomplete="off">
+            <div class="help">Per-venue tag. Created in Infobip if it doesn't exist.</div>
+          </div>
+          <div>
+            <label>Device MAC Address <span style="color:#c00">*</span></label>
+            <input type="text" name="mac_address" required placeholder="00:18:0a:26:c3:cc" autocomplete="off">
+            <div class="help">Colons, dashes, dots, or none — normalized.</div>
+          </div>
+        </div>
 
-        <label>Infobip API Key <span style="color:#c00">*</span></label>
-        <input type="password" name="api_key" required autocomplete="off" placeholder="8c63b3819c3897c83c97cf...">
-        <div class="help">Sent as <code>Authorization: App &lt;key&gt;</code>. Stored plaintext for now.</div>
+        <fieldset style="margin-top:15px;padding:12px;background:#fafafa;">
+          <legend style="font-size:13px;color:#666;">Credentials <span style="font-weight:400;">— only required for a NEW customer; leave blank to reuse for existing.</span></legend>
 
-        <label>Infobip Base URL <span style="color:#c00">*</span></label>
-        <input type="text" name="base_url" required placeholder="e53je3.api-us.infobip.com">
-        <div class="help">The customer's tenant subdomain. Do NOT include <code>https://</code>.</div>
+          <div class="grid">
+            <div>
+              <label>Contact Email</label>
+              <input type="email" name="contact_email" placeholder="andy@roggenart.com" autocomplete="off">
+            </div>
+            <div>
+              <label>Infobip Base URL</label>
+              <input type="text" name="base_url" placeholder="e53je3.api-us.infobip.com" autocomplete="off">
+            </div>
+          </div>
 
-        <label>Location Tag <span style="color:#c00">*</span></label>
-        <input type="text" name="source_tag" required placeholder="Roggenart - Catonsville">
-        <div class="help">Per-venue tag applied to every synced person. Created in Infobip if it doesn't exist.</div>
+          <label>Infobip API Key</label>
+          <input type="password" name="api_key" autocomplete="new-password" placeholder="8c63b3819c3897c83c97cf...">
+          <div class="help">Sent as <code>Authorization: App &lt;key&gt;</code>. Reused from existing account if left blank.</div>
+        </fieldset>
 
-        <label>Device MAC Address <span style="color:#c00">*</span></label>
-        <input type="text" name="mac_address" required placeholder="00:18:0a:26:c1:fa">
-        <div class="help">Colons, dashes, dots, or none — normalized to lowercase XX:XX:XX:XX:XX:XX.</div>
-
-        <button type="submit" class="primary">Add Customer</button>
-      </form>
-    </fieldset>
-
-    <fieldset id="form-new-location" style="display:none;">
-      <legend>New location for existing customer</legend>
-      <form method="POST" action="/admin/infobip">
-        <input type="hidden" name="mode" value="new-location">
-        <label>Account <span style="color:#c00">*</span></label>
-        <select name="existing_account" id="existing_account" required onchange="autoFillFromAccount()">
-          <option value="">— pick an account —</option>
-          ${accountOptions}
-        </select>
-        <div class="help">Credentials are copied from an existing row for this account.</div>
-
-        <label>Location Tag <span style="color:#c00">*</span></label>
-        <input type="text" name="source_tag" required placeholder="Roggenart - Baltimore">
-
-        <label>Device MAC Address <span style="color:#c00">*</span></label>
-        <input type="text" name="mac_address" required placeholder="00:18:0a:26:c3:cc">
-
-        <button type="submit" class="primary">Add Location</button>
+        <button type="submit" class="primary">Save Connection</button>
       </form>
     </fieldset>
   </div>
 
   <div class="card">
     <h2 style="margin-top:0;">Connections (${connections.length})</h2>
+    <div class="search"><input id="conn-filter" type="text" placeholder="Filter by name, tag, MAC, email..." oninput="filterConns(this.value)"></div>
     <div style="overflow-x:auto;">
       <table>
         <thead>
           <tr><th>Account</th><th>Location / Contact</th><th>MAC</th><th>Base URL</th><th>Tag</th><th></th></tr>
         </thead>
-        <tbody>
+        <tbody id="conn-rows">
           ${rows || `<tr><td colspan="6" style="text-align:center;color:#999;padding:30px;">No connections yet. Add one above.</td></tr>`}
         </tbody>
       </table>
@@ -187,14 +185,12 @@ function renderPage(connections, accounts, flash) {
   </div>
 
   <script>
-    function showForm(which) {
-      document.getElementById('form-new-account').style.display = which === 'new-account' ? '' : 'none';
-      document.getElementById('form-new-location').style.display = which === 'new-location' ? '' : 'none';
-      document.getElementById('btn-new-account').classList.toggle('active', which === 'new-account');
-      document.getElementById('btn-new-location').classList.toggle('active', which === 'new-location');
-    }
-    function autoFillFromAccount() {
-      // Purely a UX aid — server re-resolves credentials from the picked account.
+    function filterConns(q) {
+      q = q.toLowerCase().trim();
+      const rows = document.querySelectorAll('#conn-rows tr');
+      rows.forEach(r => {
+        r.style.display = !q || r.textContent.toLowerCase().includes(q) ? '' : 'none';
+      });
     }
   </script>
 </body>
@@ -217,34 +213,49 @@ router.get('/', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const { mode, mac_address, source_tag } = req.body;
-    const mac = normalizeMac(mac_address);
-    if (!mac) return res.redirect(`/admin/infobip?err=1&flash=${encodeURIComponent('Invalid MAC address.')}`);
+    const rawAccount = String(req.body.account_name || '').trim();
+    const rawTag = String(req.body.source_tag || '').trim();
+    const rawMac = String(req.body.mac_address || '').trim();
+    const rawEmail = String(req.body.contact_email || '').trim();
+    const rawKey = String(req.body.api_key || '').trim();
+    const rawBase = String(req.body.base_url || '').trim().replace(/^https?:\/\//, '').replace(/\/+$/, '');
 
-    let accountName, contactEmail, apiKey, baseUrl;
+    if (!rawAccount) return res.redirect(`/admin/infobip?err=1&flash=${encodeURIComponent('Account Name is required.')}`);
+    if (!rawTag) return res.redirect(`/admin/infobip?err=1&flash=${encodeURIComponent('Location Tag is required.')}`);
+    const mac = normalizeMac(rawMac);
+    if (!mac) return res.redirect(`/admin/infobip?err=1&flash=${encodeURIComponent(`Invalid MAC: ${rawMac || '(empty)'}`)}`);
 
-    if (mode === 'new-location') {
-      const picked = String(req.body.existing_account || '').trim();
-      if (!picked) return res.redirect(`/admin/infobip?err=1&flash=${encodeURIComponent('Pick an existing account.')}`);
+    // Determine credentials: reuse from existing account rows if fields are blank.
+    let accountName = rawAccount;
+    let apiKey = rawKey;
+    let baseUrl = rawBase;
+    let contactEmail = rawEmail || null;
+
+    if (!apiKey || !baseUrl) {
       const rows = await db.getInfobipAccountsWithCredentials();
-      const acct = rows.find((r) => r.account_name === picked);
-      if (!acct) return res.redirect(`/admin/infobip?err=1&flash=${encodeURIComponent('Account not found.')}`);
-      accountName = acct.account_name;
-      contactEmail = acct.contact_email;
-      apiKey = acct.api_key;
-      baseUrl = acct.base_url;
-    } else {
-      accountName = String(req.body.account_name || '').trim();
-      contactEmail = String(req.body.contact_email || '').trim() || null;
-      apiKey = String(req.body.api_key || '').trim();
-      baseUrl = String(req.body.base_url || '').trim().replace(/^https?:\/\//, '').replace(/\/+$/, '');
-      if (!accountName || !apiKey || !baseUrl) {
-        return res.redirect(`/admin/infobip?err=1&flash=${encodeURIComponent('Missing required fields.')}`);
+      const acct = rows.find((r) => r.account_name.toLowerCase() === rawAccount.toLowerCase());
+      if (acct) {
+        // Match found — reuse (and canonicalize the account_name spelling)
+        accountName = acct.account_name;
+        apiKey = apiKey || acct.api_key;
+        baseUrl = baseUrl || acct.base_url;
+        contactEmail = contactEmail || acct.contact_email;
       }
     }
 
-    const tag = String(source_tag || '').trim();
-    if (!tag) return res.redirect(`/admin/infobip?err=1&flash=${encodeURIComponent('Location Tag is required.')}`);
+    if (!apiKey || !baseUrl) {
+      return res.redirect(`/admin/infobip?err=1&flash=${encodeURIComponent(
+        `Account "${rawAccount}" is new — API Key and Base URL are required.`
+      )}`);
+    }
+
+    // Check MAC collision before writing so we don't silently overwrite.
+    const existing = await db.getInfobipConnectionByMac(mac);
+    if (existing) {
+      return res.redirect(`/admin/infobip?err=1&flash=${encodeURIComponent(
+        `MAC ${mac} is already assigned to "${existing.account_name} / ${existing.source_tag}". Delete that row first if you want to reassign.`
+      )}`);
+    }
 
     const saved = await db.upsertInfobipConnection({
       macAddress: mac,
@@ -252,20 +263,22 @@ router.post('/', async (req, res) => {
       baseUrl,
       accountName,
       contactEmail,
-      sourceTag: tag,
+      sourceTag: rawTag,
       tagId: null,
     });
 
-    // Best-effort tag resolve/create (non-blocking on save — errors just leave
-    // tag_id null and the first sync will resolve it).
+    // Best-effort tag resolve/create so tag_id is cached before first sync.
+    let tagId = null;
     try {
-      const tagId = await infobip.findOrCreateTagId(apiKey, baseUrl, tag);
+      tagId = await infobip.findOrCreateTagId(apiKey, baseUrl, rawTag);
       if (tagId) await db.updateInfobipConnectionTagId(saved.id, tagId);
     } catch (e) {
       console.warn('Infobip tag resolve at admin save failed:', e.message);
     }
 
-    res.redirect(`/admin/infobip?flash=${encodeURIComponent(`Saved ${accountName} — ${tag} (${mac}).`)}`);
+    res.redirect(`/admin/infobip?flash=${encodeURIComponent(
+      `Saved ${accountName} — ${rawTag} (${mac})${tagId ? ` [tag #${tagId}]` : ''}.`
+    )}`);
   } catch (error) {
     console.error('admin-infobip upsert error:', error);
     res.redirect(`/admin/infobip?err=1&flash=${encodeURIComponent(error.message || 'Failed to save')}`);
