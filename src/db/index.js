@@ -655,6 +655,7 @@ async function listVivaspotSitesWithConnectionCounts() {
   const allMacs = Array.from(macSet);
   const mailchimpMapped = new Set();
   const klaviyoMapped = new Set();
+  const infobipMapped = new Set();
 
   if (allMacs.length > 0) {
     const mcResult = await query(
@@ -668,6 +669,12 @@ async function listVivaspotSitesWithConnectionCounts() {
       [allMacs]
     );
     kvResult.rows.forEach((r) => klaviyoMapped.add(r.mac_address.toLowerCase()));
+
+    const ibResult = await query(
+      'SELECT mac_address FROM infobip_connections WHERE LOWER(mac_address) = ANY($1)',
+      [allMacs]
+    );
+    ibResult.rows.forEach((r) => infobipMapped.add(r.mac_address.toLowerCase()));
   }
 
   // Sync activity for a rolling 30-day window (per-MAC ok/err/lastAt per CRM).
@@ -679,15 +686,17 @@ async function listVivaspotSitesWithConnectionCounts() {
     s.total_macs = macs.length;
     s.mailchimp_count = macs.filter((m) => mailchimpMapped.has(m)).length;
     s.klaviyo_count = macs.filter((m) => klaviyoMapped.has(m)).length;
+    s.infobip_count = macs.filter((m) => infobipMapped.has(m)).length;
 
     s.activity = {
       mailchimp: { ok: 0, err: 0, lastAt: null },
       klaviyo: { ok: 0, err: 0, lastAt: null },
+      infobip: { ok: 0, err: 0, lastAt: null },
     };
     for (const mac of macs) {
       const bucket = activityMap.get(mac);
       if (!bucket) continue;
-      for (const crm of ['mailchimp', 'klaviyo']) {
+      for (const crm of ['mailchimp', 'klaviyo', 'infobip']) {
         if (!bucket[crm]) continue;
         s.activity[crm].ok += bucket[crm].ok || 0;
         s.activity[crm].err += bucket[crm].err || 0;
@@ -982,6 +991,99 @@ async function findKlaviyoConnectionsByAccountName(searchName, threshold = 0.3) 
   return result.rows;
 }
 
+// =============================================================================
+// Infobip Connection Operations
+// =============================================================================
+
+async function upsertInfobipConnection({
+  macAddress,
+  apiKey,
+  baseUrl,
+  accountName,
+  contactEmail,
+  sourceTag,
+  tagId,
+}) {
+  const result = await query(`
+    INSERT INTO infobip_connections (
+      mac_address, api_key, base_url, account_name, contact_email,
+      source_tag, tag_id, updated_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+    ON CONFLICT (mac_address)
+    DO UPDATE SET
+      api_key = EXCLUDED.api_key,
+      base_url = EXCLUDED.base_url,
+      account_name = EXCLUDED.account_name,
+      contact_email = EXCLUDED.contact_email,
+      source_tag = EXCLUDED.source_tag,
+      tag_id = COALESCE(EXCLUDED.tag_id, infobip_connections.tag_id),
+      updated_at = NOW()
+    RETURNING *
+  `, [macAddress, apiKey, baseUrl, accountName, contactEmail, sourceTag, tagId]);
+  return result.rows[0];
+}
+
+async function getInfobipConnectionByMac(macAddress) {
+  const result = await query(
+    'SELECT * FROM infobip_connections WHERE LOWER(mac_address) = LOWER($1)',
+    [macAddress]
+  );
+  return result.rows[0] || null;
+}
+
+async function getAllInfobipConnections() {
+  const result = await query(
+    `SELECT id, mac_address, account_name, contact_email, source_tag, tag_id,
+            base_url, created_at, updated_at
+     FROM infobip_connections
+     ORDER BY account_name ASC, source_tag ASC`
+  );
+  return result.rows;
+}
+
+async function getInfobipAccountsWithCredentials() {
+  // Distinct accounts with a sample of their credentials for the "add new
+  // location to existing account" dropdown in the admin UI.
+  const result = await query(`
+    SELECT DISTINCT ON (account_name)
+      account_name, api_key, base_url, contact_email
+    FROM infobip_connections
+    ORDER BY account_name ASC, created_at ASC
+  `);
+  return result.rows;
+}
+
+async function deleteInfobipConnectionById(id) {
+  const result = await query(
+    'DELETE FROM infobip_connections WHERE id = $1 RETURNING *',
+    [id]
+  );
+  return result.rows[0] || null;
+}
+
+async function updateInfobipConnectionTagId(id, tagId) {
+  await query(
+    'UPDATE infobip_connections SET tag_id = $1, updated_at = NOW() WHERE id = $2',
+    [tagId, id]
+  );
+}
+
+/**
+ * Rotate credentials across every row for one account (single query).
+ */
+async function rotateInfobipCredentials(accountName, { apiKey, baseUrl }) {
+  const result = await query(
+    `UPDATE infobip_connections
+     SET api_key = COALESCE($1, api_key),
+         base_url = COALESCE($2, base_url),
+         updated_at = NOW()
+     WHERE account_name = $3
+     RETURNING id`,
+    [apiKey || null, baseUrl || null, accountName]
+  );
+  return result.rowCount;
+}
+
 module.exports = {
   pool,
   vivaspotPool,
@@ -1011,6 +1113,15 @@ module.exports = {
   upsertVivaspotSite,
   deleteVivaspotSiteById,
   normalizeMacAddress,
+
+  // Infobip
+  upsertInfobipConnection,
+  getInfobipConnectionByMac,
+  getAllInfobipConnections,
+  getInfobipAccountsWithCredentials,
+  deleteInfobipConnectionById,
+  updateInfobipConnectionTagId,
+  rotateInfobipCredentials,
 
   // OAuth
   createPendingOAuth,

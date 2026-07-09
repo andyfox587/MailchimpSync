@@ -286,6 +286,52 @@ const migrations = [
       CREATE INDEX IF NOT EXISTS idx_sync_log_mac_crm_created
       ON sync_log(mac_address, crm, created_at DESC);
     `
+  },
+
+  // Infobip connections. API-key-based (no OAuth), so per-MAC row stores
+  // the customer's api_key + base_url (their tenant subdomain). account_name
+  // groups a customer's multiple locations for credential rotation.
+  {
+    name: 'create_infobip_connections',
+    sql: `
+      CREATE TABLE IF NOT EXISTS infobip_connections (
+        id SERIAL PRIMARY KEY,
+
+        mac_address VARCHAR(17) NOT NULL UNIQUE,
+
+        -- Customer's Infobip tenant credentials
+        api_key TEXT NOT NULL,
+        base_url TEXT NOT NULL,
+
+        -- Grouping / display
+        account_name TEXT NOT NULL,
+        contact_email VARCHAR(255),
+
+        -- Per-location tag applied to synced people
+        source_tag VARCHAR(100),
+        -- Cached tag id from Infobip (resolved/created on first sync)
+        tag_id INTEGER,
+
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      );
+    `
+  },
+
+  {
+    name: 'create_infobip_account_name_index',
+    sql: `
+      CREATE INDEX IF NOT EXISTS idx_infobip_account_name
+      ON infobip_connections(account_name);
+    `
+  },
+
+  {
+    name: 'create_infobip_account_name_trgm_index',
+    sql: `
+      CREATE INDEX IF NOT EXISTS idx_infobip_account_name_trgm
+      ON infobip_connections USING gin(account_name gin_trgm_ops);
+    `
   }
 ];
 
