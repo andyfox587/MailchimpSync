@@ -11,8 +11,16 @@
  *   "last_name": "Doe",
  *   "phone": "+1234567890",
  *   "source": "WiFi Portal",
- *   "location_name": "Joe's Pizza - Main St"
+ *   "location_name": "Joe's Pizza - Main St",
+ *   "opt_in": true
  * }
+ *
+ * Consent (decided 1 Oct 2026): a guest who ticked the email box (opt_in true)
+ * is added as "subscribed". One who didn't (opt_in false, "", "no"…) is added
+ * with marketing not allowed (Mailchimp status "transactional") and the tag
+ * NO_CONSENT_TAG, so the merchant sees them but can't email them in campaigns
+ * until they decide otherwise. A payload without opt_in at all (an older
+ * sender) keeps the old behaviour: subscribed.
  */
 
 const express = require('express');
@@ -21,6 +29,23 @@ const router = express.Router();
 
 const db = require('../db');
 const mailchimp = require('../services/mailchimp');
+
+const NO_CONSENT_TAG = 'WiFi: no email consent';
+
+/** true / false from the guest's answer, or null when the sender didn't say. */
+function consentFrom(body) {
+  const raw = body.opt_in !== undefined ? body.opt_in : body.opt_in_email;
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw === 'boolean') return raw;
+  return /^(true|1|yes|y|on|checked)$/i.test(String(raw).trim());
+}
+
+/** The status, extra tags and options for a guest's consent. */
+function consentPlan(optedIn) {
+  if (optedIn === false) return { status: 'transactional', tags: [NO_CONSENT_TAG], options: { optedIn: false } };
+  if (optedIn === true) return { status: 'subscribed', tags: [], options: { optedIn: true, removeTags: [NO_CONSENT_TAG] } };
+  return { status: 'subscribed', tags: [], options: {} };
+}
 
 /**
  * Verify webhook signature (if secret is configured)
@@ -121,17 +146,32 @@ router.post('/contact', verifySignature, async (req, res) => {
       });
     }
     
+    // Connected from the merchant app but no audience chosen yet: hold off.
+    if (!connection.audience_id) {
+      await db.logSync({
+        macAddress: normalizedMac,
+        email: email,
+        success: false,
+        errorMessage: 'Audience not chosen yet',
+        crm: 'mailchimp',
+      });
+      return res.status(409).json({ error: 'Mailchimp is connected but no audience is chosen yet', mac_address: normalizedMac });
+    }
+
+    const consent = consentPlan(consentFrom(req.body));
+
     // Build contact object
     const contact = {
       email: email,
       firstName: first_name,
       lastName: last_name,
       phone: phone,
-      mergeFields: custom_fields
+      mergeFields: custom_fields,
+      status: consent.status
     };
     
     // Build tags array - always include VivaSpot WiFi tag
-    const tags = ['VivaSpot WiFi'];
+    const tags = ['VivaSpot WiFi', ...consent.tags];
     if (connection.source_tag) {
       tags.push(connection.source_tag);
     }
@@ -145,7 +185,8 @@ router.post('/contact', verifySignature, async (req, res) => {
       connection.data_center,
       connection.audience_id,
       contact,
-      tags
+      tags,
+      consent.options
     );
     
     const duration = Date.now() - startTime;
@@ -226,16 +267,17 @@ router.post('/contacts/batch', verifySignature, async (req, res) => {
         try {
           const connection = await db.getConnectionByMac(contact.mac_address);
           
-          if (!connection) {
+          if (!connection || !connection.audience_id) {
             results.failed++;
             results.errors.push({
               index: i + index,
               email: contact.email,
-              error: 'No connection found'
+              error: connection ? 'Audience not chosen yet' : 'No connection found'
             });
             return;
           }
           
+          const consent = consentPlan(consentFrom(contact));
           await mailchimp.syncContact(
             connection.access_token,
             connection.data_center,
@@ -244,9 +286,11 @@ router.post('/contacts/batch', verifySignature, async (req, res) => {
               email: contact.email,
               firstName: contact.first_name,
               lastName: contact.last_name,
-              phone: contact.phone
+              phone: contact.phone,
+              status: consent.status
             },
-            connection.source_tag ? [connection.source_tag] : []
+            [...(connection.source_tag ? [connection.source_tag] : []), ...consent.tags],
+            consent.options
           );
           
           results.success++;
@@ -376,3 +420,5 @@ async function tryAutoMapping(macAddress, locationName) {
 }
 
 module.exports = router;
+module.exports.consentFrom = consentFrom;
+module.exports.consentPlan = consentPlan;

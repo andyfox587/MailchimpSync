@@ -22,6 +22,7 @@ const klaviyoWebhookRoutes = require('./routes/klaviyo-webhook');
 const adminSitesRoutes = require('./routes/admin-sites');
 const infobipWebhookRoutes = require('./routes/infobip-webhook');
 const adminInfobipRoutes = require('./routes/admin-infobip');
+const appRoutes = require('./routes/app');
 
 // Database
 const db = require('./db');
@@ -50,7 +51,8 @@ const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 100, // limit each IP to 100 requests per windowMs
   message: { error: 'Too many requests, please try again later.' },
-  skip: (req) => req.path.startsWith('/oauth') || req.path.startsWith('/klaviyo/oauth'),
+  // /app/* is the merchant app's server, behind APP_API_KEY: many merchants share its few IPs.
+  skip: (req) => req.path.startsWith('/oauth') || req.path.startsWith('/klaviyo/oauth') || req.path.startsWith('/app/'),
 });
 app.use(limiter);
 
@@ -88,6 +90,9 @@ app.use('/webhook', webhookRoutes);
 
 // Connection management (for admin/debugging)
 app.use('/connections', connectionRoutes);
+
+// Merchant app (vivaspot-campaigns), server-to-server with X-App-Key
+app.use('/app', appRoutes);
 
 // Manual setup (fallback when auto-mapping fails)
 app.use('/setup', setupRoutes);

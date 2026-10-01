@@ -332,6 +332,22 @@ const migrations = [
       CREATE INDEX IF NOT EXISTS idx_infobip_account_name_trgm
       ON infobip_connections USING gin(account_name gin_trgm_ops);
     `
+  },
+  // VivaSpot account id, for connections made from the merchant app (/app).
+  // Nullable: staff-made and auto-mapped connections don't have one.
+  {
+    name: 'add_mailchimp_connections_acc_id',
+    sql: `
+      ALTER TABLE mailchimp_connections
+      ADD COLUMN IF NOT EXISTS acc_id VARCHAR(64);
+    `
+  },
+  {
+    name: 'create_mailchimp_connections_acc_id_index',
+    sql: `
+      CREATE INDEX IF NOT EXISTS idx_mailchimp_acc_id
+      ON mailchimp_connections(acc_id);
+    `
   }
 ];
 

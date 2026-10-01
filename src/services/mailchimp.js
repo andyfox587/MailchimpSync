@@ -85,7 +85,8 @@ async function getAccountMetadata(accessToken) {
  * Create a Mailchimp API client for a specific account
  */
 function createClient(accessToken, dataCenter) {
-  const baseURL = `https://${dataCenter}.api.mailchimp.com/3.0`;
+  // MAILCHIMP_API_BASE_OVERRIDE points every call at a local stand-in, for tests only.
+  const baseURL = process.env.MAILCHIMP_API_BASE_OVERRIDE || `https://${dataCenter}.api.mailchimp.com/3.0`;
   
   return axios.create({
     baseURL,
@@ -182,17 +183,17 @@ async function upsertContact(accessToken, dataCenter, audienceId, contact) {
 }
 
 /**
- * Add tags to a contact
+ * Add tags to a contact (and take off any in `removeTags`)
  */
-async function addTagsToContact(accessToken, dataCenter, audienceId, email, tags) {
+async function addTagsToContact(accessToken, dataCenter, audienceId, email, tags, removeTags = []) {
   const client = createClient(accessToken, dataCenter);
   const subscriberHash = getSubscriberHash(email);
   
   // Format tags for the API
-  const formattedTags = tags.map(tag => ({
-    name: tag,
-    status: 'active'
-  }));
+  const formattedTags = [
+    ...tags.map(tag => ({ name: tag, status: 'active' })),
+    ...removeTags.map(tag => ({ name: tag, status: 'inactive' })),
+  ];
   
   try {
     await client.post(
@@ -235,15 +236,39 @@ async function getContact(accessToken, dataCenter, audienceId, email) {
 }
 
 /**
- * Full contact sync: upsert contact and add tags
+ * Change a contact's status, e.g. a "transactional" (marketing not allowed)
+ * contact who has now said yes to email becomes "subscribed".
  */
-async function syncContact(accessToken, dataCenter, audienceId, contact, tags = []) {
+async function setMemberStatus(accessToken, dataCenter, audienceId, email, status) {
+  const client = createClient(accessToken, dataCenter);
+  try {
+    const response = await client.patch(`/lists/${audienceId}/members/${getSubscriberHash(email)}`, { status });
+    return response.data.status;
+  } catch (error) {
+    console.error('Failed to change contact status:', error.response?.data || error.message);
+    throw new Error(error.response?.data?.detail || 'Failed to change contact status');
+  }
+}
+
+/**
+ * Full contact sync: upsert contact and add tags.
+ *
+ * `options.optedIn === true` also moves an existing "transactional" contact
+ * (added earlier without consent) to "subscribed" and takes off
+ * `options.removeTags`. Never re-subscribes someone who unsubscribed.
+ */
+async function syncContact(accessToken, dataCenter, audienceId, contact, tags = [], options = {}) {
   // First, add/update the contact
   const result = await upsertContact(accessToken, dataCenter, audienceId, contact);
-  
+
+  if (options.optedIn === true && result.status === 'transactional') {
+    result.status = await setMemberStatus(accessToken, dataCenter, audienceId, contact.email, 'subscribed');
+  }
+
   // Then add tags if any are specified
-  if (tags.length > 0) {
-    await addTagsToContact(accessToken, dataCenter, audienceId, contact.email, tags);
+  const removeTags = options.removeTags || [];
+  if (tags.length > 0 || removeTags.length > 0) {
+    await addTagsToContact(accessToken, dataCenter, audienceId, contact.email, tags, removeTags);
   }
   
   return result;
@@ -300,5 +325,6 @@ module.exports = {
   upsertContact,
   addTagsToContact,
   getContact,
+  setMemberStatus,
   syncContact
 };
