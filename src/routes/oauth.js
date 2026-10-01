@@ -27,6 +27,7 @@ const {
   requestFingerprint,
   isLinkCheckerUA,
 } = require('../lib/oauthHelpers');
+const { appFlowFrom, appReturn, completeAppFlow } = require('./app');
 
 /**
  * Start OAuth flow
@@ -115,11 +116,16 @@ router.get('/callback', async (req, res) => {
     // Check for OAuth errors
     if (oauthError) {
       logEvent('oauth.callback.mailchimp_error', { ref_id: refId, oauth_error: oauthError });
+      // A merchant-app flow goes back to the app (e.g. they clicked "Deny").
+      if (state) {
+        const flow = appFlowFrom((await db.consumePendingOAuth(state)).row);
+        if (flow) return res.redirect(appReturn(flow, 'cancelled'));
+      }
       return res.status(400).send(`
         <html>
           <body style="font-family: Arial, sans-serif; padding: 40px; text-align: center;">
             <h1>Authorization Failed</h1>
-            <p>Mailchimp returned an error: ${oauthError}</p>
+            <p>Mailchimp returned an error: ${escapeHtml(oauthError)}</p>
             <p>Please try again or contact support.</p>
             <p style="color:#999;font-size:12px;margin-top:30px;">Ref: ${refId}</p>
           </body>
@@ -149,6 +155,15 @@ router.get('/callback', async (req, res) => {
     });
 
     if (consumeResult.status !== 'consumed') {
+      // A merchant-app flow that was already completed (double hit): back to the app.
+      const usedFlow = appFlowFrom(consumeResult.row);
+      if (usedFlow && consumeResult.status === 'recently_used') {
+        return res.redirect(appReturn(usedFlow, 'connected'));
+      }
+      if (usedFlow) {
+        return res.redirect(appReturn(usedFlow, 'expired'));
+      }
+
       // For 'recently_used' (prefetch / double-submit), render the success
       // page if we can find a connection that was already created for this
       // state's MAC. This is the idempotent path.
@@ -190,6 +205,14 @@ router.get('/callback', async (req, res) => {
     }
 
     const pendingOAuth = consumeResult.row;
+
+    // Started from the merchant app (/app/mailchimp/connect): the app already
+    // knows the account and its access points, so no matching or hosted pages.
+    const appFlow = appFlowFrom(pendingOAuth);
+    if (appFlow) {
+      return completeAppFlow(res, appFlow, code, refId);
+    }
+
     const { mac_address, redirect_url } = pendingOAuth;
     
     // Exchange code for access token
@@ -670,10 +693,34 @@ router.post('/add-location', express.urlencoded({ extended: true }), async (req,
 });
 
 /**
+ * The per-MAC status and disconnect routes used to be open to anyone who knew
+ * a MAC. They now need the admin key (X-API-Key = ADMIN_API_KEY); in
+ * production they refuse when no key is configured. The merchant app uses
+ * /app/* instead.
+ */
+function requireAdminKey(req, res, next) {
+  const expected = process.env.ADMIN_API_KEY;
+  if (!expected) {
+    if (process.env.NODE_ENV === 'production') return res.status(503).json({ error: 'Not configured' });
+    return next();
+  }
+  const given = Buffer.from(String(req.headers['x-api-key'] || ''));
+  const want = Buffer.from(expected);
+  if (given.length !== want.length || !crypto.timingSafeEqual(given, want)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/**
  * Get OAuth status for a MAC address
  * GET /oauth/status/:mac_address
  */
-router.get('/status/:mac_address', async (req, res) => {
+router.get('/status/:mac_address', requireAdminKey, async (req, res) => {
   try {
     const connection = await db.getConnectionByMac(req.params.mac_address);
     
@@ -706,7 +753,7 @@ router.get('/status/:mac_address', async (req, res) => {
  * Disconnect (revoke) a connection
  * DELETE /oauth/disconnect/:mac_address
  */
-router.delete('/disconnect/:mac_address', async (req, res) => {
+router.delete('/disconnect/:mac_address', requireAdminKey, async (req, res) => {
   try {
     const deleted = await db.deleteConnection(req.params.mac_address);
     
@@ -730,8 +777,10 @@ router.delete('/disconnect/:mac_address', async (req, res) => {
 // =============================================================================
 
 function renderSuccessPage(res, accountName, audienceName, redirectUrl, deviceCount = 1, locationName = null) {
-  const redirectScript = redirectUrl
-    ? `<script>setTimeout(() => window.location.href = '${redirectUrl}', 3000);</script>`
+  // Only an http(s) URL, written as a JSON string so it can't break out of the script.
+  const safeRedirect = /^https?:\/\//i.test(String(redirectUrl || '')) ? JSON.stringify(String(redirectUrl)).replace(/</g, '\\u003c') : null;
+  const redirectScript = safeRedirect
+    ? `<script>setTimeout(() => window.location.href = ${safeRedirect}, 3000);</script>`
     : '';
 
   const locationInfo = locationName

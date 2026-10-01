@@ -212,10 +212,39 @@ Configure your n8n "CRM Router" workflow to call this integration:
     "first_name": "{{ $json.first_name }}",
     "last_name": "{{ $json.last_name }}",
     "phone": "{{ $json.phone }}",
-    "location_name": "{{ $json.location_name }}"
+    "location_name": "{{ $json.location_name }}",
+    "opt_in": "{{ $json.form.opt_in_email }}"
   }
 }
 ```
+
+### Consent (`opt_in`)
+
+Decided 1 Oct 2026. Send the guest's answer to the email box as `opt_in`:
+
+| `opt_in` | Mailchimp status for a new contact | Tag |
+|---|---|---|
+| `true`, `"true"`, `"yes"`, `"1"`, `"on"` | `subscribed` (an existing `transactional` contact is moved to `subscribed`) | removes `WiFi: no email consent` |
+| `false`, `""`, anything else | `transactional`: in the audience, but marketing not allowed | `WiFi: no email consent` |
+| missing | `subscribed` (the old behaviour, for senders that don't pass it yet) | – |
+
+A contact who unsubscribed is never re-subscribed.
+
+## Merchant app API (`/app/mailchimp/*`)
+
+For the VivaSpot merchant app (vivaspot-campaigns), server to server only, with `X-App-Key: $APP_API_KEY`. The app passes the merchant's VivaSpot account (`acc_id`) and its access points' MACs, read from VivaSpot with the merchant's own login, so a connection is tied to the account, not matched by Mailchimp login email or restaurant name. Rows carry `acc_id`; a row with no `acc_id` (made by staff or auto-mapping) whose MAC is one of the account's is treated as the account's and claimed when the merchant changes it.
+
+| Method & path | Body / query | Returns |
+|---|---|---|
+| `POST /app/mailchimp/connect` | `{ acc_id, macs, return_url }` | `{ authorize_url }`: send the merchant's browser there. After Mailchimp, `/oauth/callback` saves the connection and redirects to `return_url?mailchimp=connected \| choose_audience \| no_audience \| cancelled \| expired \| error` |
+| `GET /app/mailchimp/status` | `?acc_id=&macs=a,b` | `{ connected, account_name, audience_name, needs_audience, access_points, last_sent_at, last_error, sent_30d, failed_30d }`. No guest data |
+| `GET /app/mailchimp/audiences` | `?acc_id=&macs=a,b` | `{ audiences: [{ id, name, member_count }] }` |
+| `POST /app/mailchimp/audience` | `{ acc_id, macs, audience_id }` | Sets the audience for all the account's access points |
+| `POST /app/mailchimp/disconnect` | `{ acc_id, macs }` | Deletes the account's connections. Contacts already in Mailchimp stay |
+
+With several audiences and none chosen yet, contacts are held back (`409`, logged as "Audience not chosen yet") until the merchant chooses one.
+
+Run `npm run db:migrate` before deploying this (it adds `mailchimp_connections.acc_id`).
 
 ## Environment Variables
 
@@ -229,7 +258,9 @@ Configure your n8n "CRM Router" workflow to call this integration:
 | `PORT` | No | Server port (default: 3000) |
 | `NODE_ENV` | No | Environment (development/production) |
 | `WEBHOOK_SECRET` | No | HMAC secret for webhook signature verification |
-| `ADMIN_API_KEY` | No | API key for admin endpoints |
+| `ADMIN_API_KEY` | No | API key for admin endpoints (`/connections`, `/admin/*`, `/oauth/status`, `/oauth/disconnect`; the last two refuse in production without it) |
+| `APP_API_KEY` | For `/app/*` | Shared key the merchant app's server sends as `X-App-Key`. `/app/*` refuses without it |
+| `APP_RETURN_ORIGINS` | For `/app/*` | Comma-separated origins the app may be sent back to after connecting, e.g. `https://vivaspot-campaigns.vercel.app` |
 | `DEBUG` | No | Enable verbose logging (true/false) |
 
 ## Database Schema

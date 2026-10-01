@@ -215,6 +215,125 @@ async function deleteConnection(macAddress) {
   return result.rows[0] || null;
 }
 
+// =============================================================================
+// Merchant app (vivaspot-campaigns) connections, keyed by VivaSpot account
+// =============================================================================
+//
+// The merchant app knows the VivaSpot account (acc_id) and its access points'
+// MACs. A row belongs to an account when it carries that acc_id, or when it
+// has no acc_id yet (made by staff or auto-mapping) and its MAC is one of the
+// account's. Rows tagged with a different acc_id are never touched.
+
+const APP_ROW_FILTER = `(acc_id = $1 OR (acc_id IS NULL AND LOWER(mac_address) = ANY($2)))`;
+
+/**
+ * Connect an account's access points to one Mailchimp account. `audienceId`
+ * may be null: the merchant then chooses it in the app, and the webhook skips
+ * contacts until they do.
+ */
+async function upsertAppConnections(accId, macs, { accessToken, dataCenter, accountId, accountName, audienceId, audienceName }) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const rows = [];
+    for (const mac of macs) {
+      const result = await client.query(`
+        INSERT INTO mailchimp_connections (
+          mac_address, access_token, data_center, account_id,
+          account_name, audience_id, audience_name, source_tag, acc_id, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, NOW())
+        ON CONFLICT (mac_address)
+        DO UPDATE SET
+          access_token = EXCLUDED.access_token,
+          data_center = EXCLUDED.data_center,
+          account_id = EXCLUDED.account_id,
+          account_name = EXCLUDED.account_name,
+          audience_id = EXCLUDED.audience_id,
+          audience_name = EXCLUDED.audience_name,
+          acc_id = EXCLUDED.acc_id,
+          updated_at = NOW()
+        RETURNING *
+      `, [mac, accessToken, dataCenter, accountId, accountName, audienceId, audienceName, accId]);
+      rows.push(result.rows[0]);
+    }
+    await client.query('COMMIT');
+    return rows;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/** The account's Mailchimp connections (see APP_ROW_FILTER). */
+async function getAppConnections(accId, macs) {
+  const result = await query(
+    `SELECT * FROM mailchimp_connections WHERE ${APP_ROW_FILTER} ORDER BY created_at`,
+    [accId, macs.map((m) => m.toLowerCase())]
+  );
+  return result.rows;
+}
+
+/** Point all of the account's connections at one audience, and claim them for the account. */
+async function setAppAudience(accId, macs, audienceId, audienceName) {
+  const result = await query(
+    `UPDATE mailchimp_connections
+        SET audience_id = $3, audience_name = $4, acc_id = $1, updated_at = NOW()
+      WHERE ${APP_ROW_FILTER}
+      RETURNING *`,
+    [accId, macs.map((m) => m.toLowerCase()), audienceId, audienceName]
+  );
+  return result.rows;
+}
+
+/** Disconnect the account: delete its connections. */
+async function deleteAppConnections(accId, macs) {
+  const result = await query(
+    `DELETE FROM mailchimp_connections WHERE ${APP_ROW_FILTER} RETURNING mac_address`,
+    [accId, macs.map((m) => m.toLowerCase())]
+  );
+  return result.rowCount;
+}
+
+/**
+ * The latest Mailchimp send and the latest failure for these MACs since a
+ * time (the connection's start, so older "not connected" rows don't count).
+ * Never returns guest emails.
+ */
+async function getLastSyncResults(macs, since) {
+  const result = await query(`
+    SELECT DISTINCT ON (success) success, error_message, created_at
+      FROM sync_log
+     WHERE LOWER(mac_address) = ANY($1)
+       AND COALESCE(crm, 'mailchimp') = 'mailchimp'
+       AND created_at >= $2
+     ORDER BY success, created_at DESC
+  `, [macs.map((m) => m.toLowerCase()), since]);
+  const ok = result.rows.find((r) => r.success);
+  const bad = result.rows.find((r) => !r.success);
+  return {
+    lastSentAt: ok ? ok.created_at : null,
+    lastError: bad ? { message: bad.error_message, at: bad.created_at } : null,
+  };
+}
+
+/** Sends and failures for these MACs since a time. */
+async function countSyncs(macs, since) {
+  const result = await query(`
+    SELECT success, COUNT(*)::int AS n
+      FROM sync_log
+     WHERE LOWER(mac_address) = ANY($1)
+       AND COALESCE(crm, 'mailchimp') = 'mailchimp'
+       AND created_at >= $2
+     GROUP BY success
+  `, [macs.map((m) => m.toLowerCase()), since]);
+  return {
+    sent: result.rows.find((r) => r.success)?.n ?? 0,
+    failed: result.rows.find((r) => !r.success)?.n ?? 0,
+  };
+}
+
 /**
  * Find connections by fuzzy matching account name
  * Uses PostgreSQL pg_trgm extension for similarity search
@@ -1100,6 +1219,14 @@ module.exports = {
   getAllConnections,
   deleteConnection,
   findConnectionsByAccountName,
+
+  // Merchant app (by VivaSpot account)
+  upsertAppConnections,
+  getAppConnections,
+  setAppAudience,
+  deleteAppConnections,
+  getLastSyncResults,
+  countSyncs,
 
   // VivaSpot Sites
   findSiteByRestaurantName,
