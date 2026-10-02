@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-10-02
+
+### Security
+- One lock for the sign-up webhooks (`/webhook/*`, `/klaviyo/webhook/*`, `/infobip/webhook/*`, and their `/test` routes): `X-Webhook-Key` matching `WEBHOOK_KEY`, or the older HMAC signature with `WEBHOOK_SECRET`. Production had neither set, so anyone could post contacts.
+- The hosted setup flow no longer puts the Mailchimp access key in links or hidden form fields: it's kept server-side in a 30-minute setup session (`/setup/:accountId?s=<id>`). `/setup/save` no longer accepts an access key from the browser, which let anyone point a venue's sign-ups at their own Mailchimp.
+- Setup page values are escaped.
+
+### Changed
+- A venue with no Mailchimp connection, or no audience chosen, is answered `200 skipped` instead of `404`/`409`, so n8n retries only real failures; "no connection" is no longer written to `sync_log` (it was most of its rows).
+- A failure to write `sync_log` no longer crashes the service; unhandled rejections are logged, uncaught exceptions restart it cleanly.
+- Expired OAuth and setup sessions are cleared hourly.
+
 ## [Unreleased] - 2026-10-01
 
 ### Added

@@ -26,6 +26,7 @@ const appRoutes = require('./routes/app');
 
 // Database
 const db = require('./db');
+const { warnIfOpen } = require('./lib/webhookAuth');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -132,11 +133,30 @@ app.use((err, req, res, next) => {
 // Server Startup
 // =============================================================================
 
+// A stray rejected promise is logged, not fatal: one bad request mustn't take
+// down the only instance and drop everyone else's sign-ups.
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason instanceof Error ? reason.message : reason);
+});
+// An exception nothing caught may leave the process in a bad state: log it and
+// exit so Render restarts a clean one (n8n retries cover the few seconds).
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception, restarting:', error);
+  process.exit(1);
+});
+
 async function startServer() {
   try {
     // Test database connection
     await db.testConnection();
     console.log('✓ Database connected');
+
+    warnIfOpen();
+
+    // Expired OAuth and setup sessions: cleared hourly (they used to pile up).
+    setInterval(() => {
+      db.cleanupExpiredOAuth().catch((error) => console.error('OAuth cleanup failed:', error.message));
+    }, 60 * 60 * 1000).unref();
 
     // Start server
     app.listen(PORT, () => {

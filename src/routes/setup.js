@@ -5,9 +5,54 @@
  */
 
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 
 const db = require('../db');
+
+// A manual-setup session lives in pending_oauth (mac_address = 'setup'), so the
+// Mailchimp access key never goes into a link, a page or the browser. The link
+// carries only ?s=<session id>; it works for 30 minutes.
+const SETUP_FLOW = 'setup';
+const SETUP_MINUTES = 30;
+
+/** Store the Mailchimp details server-side and return the setup page link. */
+async function createSetupLink({ accessToken, metadata, audienceId, audienceName, siteName = null }) {
+  const id = crypto.randomBytes(32).toString('hex');
+  await db.query(
+    `INSERT INTO pending_oauth (state, mac_address, redirect_url, expires_at)
+     VALUES ($1, $2, $3, NOW() + ($4::int * INTERVAL '1 minute'))`,
+    [id, SETUP_FLOW, JSON.stringify({
+      accessToken,
+      dataCenter: metadata.dataCenter,
+      accountId: metadata.accountId,
+      accountName: metadata.accountName,
+      audienceId,
+      audienceName,
+      siteName,
+    }), SETUP_MINUTES]
+  );
+  return `/setup/${encodeURIComponent(metadata.accountId)}?s=${id}`;
+}
+
+/** The setup session's details, or null when the id is unknown or expired. */
+async function getSetupSession(id) {
+  if (!/^[0-9a-f]{64}$/.test(String(id || ''))) return null;
+  const result = await db.query(
+    'SELECT redirect_url FROM pending_oauth WHERE state = $1 AND mac_address = $2 AND expires_at > NOW()',
+    [id, SETUP_FLOW]
+  );
+  if (!result.rows[0]) return null;
+  try {
+    return JSON.parse(result.rows[0].redirect_url);
+  } catch {
+    return null;
+  }
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
 
 /**
  * GET /setup/:accountId
@@ -15,12 +60,17 @@ const db = require('../db');
  * Display the manual MAC address entry form
  */
 router.get('/:accountId', async (req, res) => {
-  const { accountId } = req.params;
-  const { account_name, audience_id, audience_name, access_token, data_center } = req.query;
-  
-  if (!accountId) {
-    return res.status(400).send('Missing account ID');
+  const session = await getSetupSession(req.query.s);
+  if (!session || session.accountId !== req.params.accountId) {
+    return res.status(400).send(`
+      <html><body style="font-family: Arial, sans-serif; padding: 40px; text-align: center;">
+        <h1>This setup link has expired</h1>
+        <p>Setup links work for ${SETUP_MINUTES} minutes. Connect Mailchimp again to get a new one.</p>
+      </body></html>
+    `);
   }
+  const accountId = session.accountId;
+  const account_name = session.accountName;
   
   // Get existing mappings for this account
   let existingMappings = [];
@@ -34,7 +84,7 @@ router.get('/:accountId', async (req, res) => {
     console.error('Error fetching existing mappings:', err);
   }
   
-  const displayName = account_name || 'Your Account';
+  const displayName = escapeHtml(account_name || 'Your Account');
   
   res.send(`
     <!DOCTYPE html>
@@ -189,7 +239,7 @@ router.get('/:accountId', async (req, res) => {
             <div class="existing">
               <h3>✓ Already Connected (${existingMappings.length} device${existingMappings.length > 1 ? 's' : ''})</h3>
               <div>
-                ${existingMappings.map(m => `<span class="existing-mac">${m.mac_address}</span>`).join('')}
+                ${existingMappings.map(m => `<span class="existing-mac">${escapeHtml(m.mac_address)}</span>`).join('')}
               </div>
             </div>
           ` : ''}
@@ -197,12 +247,7 @@ router.get('/:accountId', async (req, res) => {
           <div id="message"></div>
           
           <form id="setup-form">
-            <input type="hidden" name="account_id" value="${accountId}">
-            <input type="hidden" name="account_name" value="${account_name || ''}">
-            <input type="hidden" name="audience_id" value="${audience_id || ''}">
-            <input type="hidden" name="audience_name" value="${audience_name || ''}">
-            <input type="hidden" name="access_token" value="${access_token || ''}">
-            <input type="hidden" name="data_center" value="${data_center || ''}">
+            <input type="hidden" name="s" value="${escapeHtml(req.query.s)}">
             
             <div class="form-group">
               <label for="mac_addresses">MAC Addresses</label>
@@ -290,23 +335,24 @@ router.get('/:accountId', async (req, res) => {
  */
 router.post('/save', express.json(), async (req, res) => {
   try {
-    const { 
-      account_id, 
-      account_name, 
-      audience_id, 
-      audience_name, 
-      access_token, 
-      data_center,
-      mac_addresses, 
-      source_tag 
-    } = req.body;
-    
-    if (!account_id || !mac_addresses) {
-      return res.status(400).json({ error: 'Missing required fields' });
+    const { s, mac_addresses, source_tag } = req.body;
+
+    // The Mailchimp details come from the server-side setup session, never
+    // from the browser: a posted access key can no longer redirect a venue's
+    // sign-ups to someone else's Mailchimp.
+    const session = await getSetupSession(s);
+    if (!session) {
+      return res.status(400).json({ error: 'This setup link has expired. Connect Mailchimp again.' });
     }
-    
-    if (!access_token || !data_center) {
-      return res.status(400).json({ error: 'Missing Mailchimp credentials. Please re-authorize.' });
+    const account_id = session.accountId;
+    const account_name = session.accountName;
+    const audience_id = session.audienceId;
+    const audience_name = session.audienceName;
+    const access_token = session.accessToken;
+    const data_center = session.dataCenter;
+
+    if (!mac_addresses || typeof mac_addresses !== 'string') {
+      return res.status(400).json({ error: 'Missing required fields' });
     }
     
     // Parse MAC addresses (one per line, various formats accepted)
@@ -370,3 +416,4 @@ router.post('/save', express.json(), async (req, res) => {
 });
 
 module.exports = router;
+module.exports.createSetupLink = createSetupLink;

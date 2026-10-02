@@ -204,7 +204,7 @@ Configure your n8n "CRM Router" workflow to call this integration:
   "url": "https://your-app.onrender.com/webhook/contact",
   "headers": {
     "Content-Type": "application/json",
-    "X-Webhook-Signature": "{{ $secret.MAILCHIMP_WEBHOOK_SECRET }}"
+    "X-Webhook-Key": "<from an n8n Header Auth credential>"
   },
   "body": {
     "mac_address": "{{ $json.mac_address }}",
@@ -217,6 +217,10 @@ Configure your n8n "CRM Router" workflow to call this integration:
   }
 }
 ```
+
+### Answers
+
+A venue with no Mailchimp connection gets `200 { success: false, status: "skipped", reason: "no_connection" }` (most venues: the router sends every sign-up to every CRM service), and so does a connection with no audience chosen yet (`reason: "no_audience"`). Only real failures are errors (`401` bad key, `400` bad input, `500` Mailchimp or database trouble), so n8n can retry them.
 
 ### Consent (`opt_in`)
 
@@ -257,7 +261,8 @@ Run `npm run db:migrate` before deploying this (it adds `mailchimp_connections.a
 | `APP_BASE_URL` | Yes | Base URL of the application |
 | `PORT` | No | Server port (default: 3000) |
 | `NODE_ENV` | No | Environment (development/production) |
-| `WEBHOOK_SECRET` | No | HMAC secret for webhook signature verification |
+| `WEBHOOK_KEY` | Yes in production | Shared key the n8n CRM Router sends as `X-Webhook-Key` on every sign-up post (`/webhook/*`, `/klaviyo/webhook/*`, `/infobip/webhook/*`). Without it (and without `WEBHOOK_SECRET`) those routes accept posts from anyone |
+| `WEBHOOK_SECRET` | No | Older alternative: HMAC-SHA256 of the JSON body in `X-Webhook-Signature`. Either passes when set |
 | `ADMIN_API_KEY` | No | API key for admin endpoints (`/connections`, `/admin/*`, `/oauth/status`, `/oauth/disconnect`; the last two refuse in production without it) |
 | `APP_API_KEY` | For `/app/*` | Shared key the merchant app's server sends as `X-App-Key`. `/app/*` refuses without it |
 | `APP_RETURN_ORIGINS` | For `/app/*` | Comma-separated origins the app may be sent back to after connecting, e.g. `https://vivaspot-campaigns.vercel.app` |

@@ -24,13 +24,22 @@
  */
 
 const express = require('express');
-const crypto = require('crypto');
 const router = express.Router();
+const { verifyWebhook } = require('../lib/webhookAuth');
 
 const db = require('../db');
 const mailchimp = require('../services/mailchimp');
 
 const NO_CONSENT_TAG = 'WiFi: no email consent';
+
+/** sync_log is a record, not part of the sync: a failure to write it is logged and ignored. */
+async function safeLogSync(entry) {
+  try {
+    await db.logSync(entry);
+  } catch (error) {
+    console.error('sync_log write failed:', error.message);
+  }
+}
 
 /** true / false from the guest's answer, or null when the sender didn't say. */
 function consentFrom(body) {
@@ -47,42 +56,12 @@ function consentPlan(optedIn) {
   return { status: 'subscribed', tags: [], options: {} };
 }
 
-/**
- * Verify webhook signature (if secret is configured)
- */
-function verifySignature(req, res, next) {
-  const secret = process.env.WEBHOOK_SECRET;
-  
-  // Skip verification if no secret configured
-  if (!secret) {
-    return next();
-  }
-  
-  const signature = req.headers['x-webhook-signature'];
-  
-  if (!signature) {
-    return res.status(401).json({ error: 'Missing webhook signature' });
-  }
-  
-  // Calculate expected signature
-  const payload = JSON.stringify(req.body);
-  const expectedSignature = crypto
-    .createHmac('sha256', secret)
-    .update(payload)
-    .digest('hex');
-  
-  if (signature !== expectedSignature) {
-    return res.status(401).json({ error: 'Invalid webhook signature' });
-  }
-  
-  next();
-}
 
 /**
  * Main contact sync endpoint
  * POST /webhook/contact
  */
-router.post('/contact', verifySignature, async (req, res) => {
+router.post('/contact', verifyWebhook, async (req, res) => {
   const startTime = Date.now();
   
   try {
@@ -129,33 +108,30 @@ router.post('/contact', verifySignature, async (req, res) => {
       connection = await tryAutoMapping(normalizedMac, location_name);
     }
     
+    // Most venues don't use Mailchimp: the CRM Router sends every sign-up to
+    // every CRM service and each keeps its own. That's a normal answer, not an
+    // error, so it's 200 (n8n retries errors) and isn't written to sync_log.
     if (!connection) {
-      console.log(`No Mailchimp connection for MAC: ${normalizedMac}`);
-      
-      await db.logSync({
-        macAddress: normalizedMac,
-        email: email,
+      return res.json({
         success: false,
-        errorMessage: 'No Mailchimp connection found',
-        crm: 'mailchimp',
-      });
-      
-      return res.status(404).json({
-        error: 'No Mailchimp connection found for this location',
+        status: 'skipped',
+        reason: 'no_connection',
         mac_address: normalizedMac
       });
     }
     
     // Connected from the merchant app but no audience chosen yet: hold off.
+    // Logged (the app shows it to the merchant) but answered 200, since
+    // retrying won't help until they choose one.
     if (!connection.audience_id) {
-      await db.logSync({
+      await safeLogSync({
         macAddress: normalizedMac,
         email: email,
         success: false,
         errorMessage: 'Audience not chosen yet',
         crm: 'mailchimp',
       });
-      return res.status(409).json({ error: 'Mailchimp is connected but no audience is chosen yet', mac_address: normalizedMac });
+      return res.json({ success: false, status: 'skipped', reason: 'no_audience', mac_address: normalizedMac });
     }
 
     const consent = consentPlan(consentFrom(req.body));
@@ -192,7 +168,7 @@ router.post('/contact', verifySignature, async (req, res) => {
     const duration = Date.now() - startTime;
     
     // Log successful sync
-    await db.logSync({
+    await safeLogSync({
       macAddress: normalizedMac,
       email: email,
       success: true,
@@ -215,9 +191,9 @@ router.post('/contact', verifySignature, async (req, res) => {
   } catch (error) {
     console.error('Contact sync error:', error);
     
-    // Log failed sync
-    await db.logSync({
-      macAddress: req.body.mac_address,
+    // Log failed sync. Never let a logging failure crash the service.
+    await safeLogSync({
+      macAddress: String(req.body.mac_address || '').toLowerCase() || 'unknown',
       email: req.body.email,
       success: false,
       errorMessage: error.message,
@@ -235,7 +211,7 @@ router.post('/contact', verifySignature, async (req, res) => {
  * Batch contact sync endpoint
  * POST /webhook/contacts/batch
  */
-router.post('/contacts/batch', verifySignature, async (req, res) => {
+router.post('/contacts/batch', verifyWebhook, async (req, res) => {
   try {
     const { contacts } = req.body;
     
@@ -318,7 +294,7 @@ router.post('/contacts/batch', verifySignature, async (req, res) => {
  * Test endpoint - verify connection works
  * POST /webhook/test
  */
-router.post('/test', async (req, res) => {
+router.post('/test', verifyWebhook, async (req, res) => {
   try {
     const { mac_address } = req.body;
     
