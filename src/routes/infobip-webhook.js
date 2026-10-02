@@ -11,31 +11,17 @@
  */
 
 const express = require('express');
-const crypto = require('crypto');
 const router = express.Router();
+const { verifyWebhook } = require('../lib/webhookAuth');
 
 const db = require('../db');
 const infobip = require('../services/infobip');
 
-function verifySignature(req, res, next) {
-  const secret = process.env.WEBHOOK_SECRET;
-  if (!secret) return next();
-  const signature = req.headers['x-webhook-signature'];
-  if (!signature) {
-    return res.status(401).json({ error: 'Missing webhook signature' });
-  }
-  const payload = JSON.stringify(req.body);
-  const expected = crypto.createHmac('sha256', secret).update(payload).digest('hex');
-  if (signature !== expected) {
-    return res.status(401).json({ error: 'Invalid webhook signature' });
-  }
-  next();
-}
 
 /**
  * POST /infobip/webhook/contact — sync a captured contact.
  */
-router.post('/contact', verifySignature, async (req, res) => {
+router.post('/contact', verifyWebhook, async (req, res) => {
   const startTime = Date.now();
   try {
     const { mac_address, email, first_name, last_name, phone, source, location_name, custom_fields = {} } = req.body;
@@ -127,7 +113,7 @@ router.post('/contact', verifySignature, async (req, res) => {
 /**
  * POST /infobip/webhook/test — verify a connection.
  */
-router.post('/test', async (req, res) => {
+router.post('/test', verifyWebhook, async (req, res) => {
   try {
     const { mac_address } = req.body;
     if (!mac_address) return res.status(400).json({ error: 'Missing mac_address' });

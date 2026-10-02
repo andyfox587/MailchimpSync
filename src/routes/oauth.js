@@ -28,6 +28,7 @@ const {
   isLinkCheckerUA,
 } = require('../lib/oauthHelpers');
 const { appFlowFrom, appReturn, completeAppFlow } = require('./app');
+const { createSetupLink } = require('./setup');
 
 /**
  * Start OAuth flow
@@ -268,12 +269,8 @@ router.get('/callback', async (req, res) => {
           return renderSuccessPage(res, metadata.accountName, selectedAudience.name, redirect_url);
         } else {
           // No MAC and no site match - redirect to manual setup
-          const setupUrl = `/setup/${encodeURIComponent(metadata.accountId)}?` +
-            `account_name=${encodeURIComponent(metadata.accountName)}` +
-            `&audience_id=${encodeURIComponent(selectedAudience.id)}` +
-            `&audience_name=${encodeURIComponent(selectedAudience.name)}` +
-            `&access_token=${encodeURIComponent(accessToken)}` +
-            `&data_center=${encodeURIComponent(metadata.dataCenter)}`;
+          // The Mailchimp access key stays on the server: the link carries only a setup session id.
+          const setupUrl = await createSetupLink({ accessToken, metadata, audienceId: selectedAudience.id, audienceName: selectedAudience.name });
 
           return res.redirect(setupUrl);
         }
@@ -303,13 +300,8 @@ router.get('/callback', async (req, res) => {
           // Site found but no MAC addresses configured
           console.log(`Site "${site.restaurant_name}" found but has no MAC addresses (single audience)`);
 
-          const setupUrl = `/setup/${encodeURIComponent(metadata.accountId)}?` +
-            `account_name=${encodeURIComponent(metadata.accountName)}` +
-            `&audience_id=${encodeURIComponent(selectedAudience.id)}` +
-            `&audience_name=${encodeURIComponent(selectedAudience.name)}` +
-            `&access_token=${encodeURIComponent(accessToken)}` +
-            `&data_center=${encodeURIComponent(metadata.dataCenter)}` +
-            `&site_name=${encodeURIComponent(site.restaurant_name)}`;
+          // The Mailchimp access key stays on the server: the link carries only a setup session id.
+          const setupUrl = await createSetupLink({ accessToken, metadata, audienceId: selectedAudience.id, audienceName: selectedAudience.name, siteName: site.restaurant_name });
 
           return res.redirect(setupUrl);
         }
@@ -417,12 +409,8 @@ router.post('/select-audience', express.urlencoded({ extended: true }), async (r
       await db.query('DELETE FROM pending_oauth WHERE state = $1', [state]);
 
       // Redirect to manual setup with credentials in query params
-      const setupUrl = `/setup/${encodeURIComponent(metadata.accountId)}?` +
-        `account_name=${encodeURIComponent(metadata.accountName)}` +
-        `&audience_id=${encodeURIComponent(audience_id)}` +
-        `&audience_name=${encodeURIComponent(audience_name)}` +
-        `&access_token=${encodeURIComponent(accessToken)}` +
-        `&data_center=${encodeURIComponent(metadata.dataCenter)}`;
+      // The Mailchimp access key stays on the server: the link carries only a setup session id.
+          const setupUrl = await createSetupLink({ accessToken, metadata, audienceId: audience_id, audienceName: audience_name });
 
       res.redirect(setupUrl);
 
@@ -457,12 +445,8 @@ router.post('/select-audience', express.urlencoded({ extended: true }), async (r
 
         await db.query('DELETE FROM pending_oauth WHERE state = $1', [state]);
 
-        const setupUrl = `/setup/${encodeURIComponent(metadata.accountId)}?` +
-          `account_name=${encodeURIComponent(metadata.accountName)}` +
-          `&audience_id=${encodeURIComponent(audience_id)}` +
-          `&audience_name=${encodeURIComponent(audience_name)}` +
-          `&access_token=${encodeURIComponent(accessToken)}` +
-          `&data_center=${encodeURIComponent(metadata.dataCenter)}`;
+        // The Mailchimp access key stays on the server: the link carries only a setup session id.
+          const setupUrl = await createSetupLink({ accessToken, metadata, audienceId: audience_id, audienceName: audience_name });
 
         res.redirect(setupUrl);
       }
@@ -565,13 +549,8 @@ router.post('/select-location', express.urlencoded({ extended: true }), async (r
       await db.query('DELETE FROM pending_oauth WHERE state = $1', [state]);
 
       const siteNames = sites.map(s => s.restaurant_name).join(', ');
-      const setupUrl = `/setup/${encodeURIComponent(metadata.accountId)}?` +
-        `account_name=${encodeURIComponent(metadata.accountName)}` +
-        `&audience_id=${encodeURIComponent(audienceId)}` +
-        `&audience_name=${encodeURIComponent(audienceName)}` +
-        `&access_token=${encodeURIComponent(accessToken)}` +
-        `&data_center=${encodeURIComponent(metadata.dataCenter)}` +
-        `&site_name=${encodeURIComponent(siteNames)}`;
+      // The Mailchimp access key stays on the server: the link carries only a setup session id.
+          const setupUrl = await createSetupLink({ accessToken, metadata, audienceId: audienceId, audienceName: audienceName, siteName: siteNames });
 
       res.redirect(setupUrl);
       return;

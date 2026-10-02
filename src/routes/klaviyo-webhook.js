@@ -18,8 +18,8 @@
  */
 
 const express = require('express');
-const crypto = require('crypto');
 const router = express.Router();
+const { verifyWebhook } = require('../lib/webhookAuth');
 
 const db = require('../db');
 const klaviyo = require('../services/klaviyo');
@@ -27,24 +27,6 @@ const klaviyo = require('../services/klaviyo');
 // Refresh a token this many seconds before it actually expires.
 const TOKEN_REFRESH_BUFFER_SECONDS = 120;
 
-/**
- * Verify webhook signature (if WEBHOOK_SECRET is configured).
- */
-function verifySignature(req, res, next) {
-  const secret = process.env.WEBHOOK_SECRET;
-  if (!secret) return next();
-
-  const signature = req.headers['x-webhook-signature'];
-  if (!signature) {
-    return res.status(401).json({ error: 'Missing webhook signature' });
-  }
-  const payload = JSON.stringify(req.body);
-  const expected = crypto.createHmac('sha256', secret).update(payload).digest('hex');
-  if (signature !== expected) {
-    return res.status(401).json({ error: 'Invalid webhook signature' });
-  }
-  next();
-}
 
 /**
  * Return a valid access token for a connection, refreshing if it's expired or
@@ -72,7 +54,7 @@ async function getValidAccessToken(connection) {
  * Main contact sync endpoint.
  * POST /klaviyo/webhook/contact
  */
-router.post('/contact', verifySignature, async (req, res) => {
+router.post('/contact', verifyWebhook, async (req, res) => {
   const startTime = Date.now();
   try {
     const { mac_address, email, first_name, last_name, phone, source, location_name, custom_fields = {} } = req.body;
@@ -150,7 +132,7 @@ router.post('/contact', verifySignature, async (req, res) => {
  * Test endpoint — verify a connection works.
  * POST /klaviyo/webhook/test
  */
-router.post('/test', async (req, res) => {
+router.post('/test', verifyWebhook, async (req, res) => {
   try {
     const { mac_address } = req.body;
     if (!mac_address) return res.status(400).json({ error: 'Missing mac_address' });
